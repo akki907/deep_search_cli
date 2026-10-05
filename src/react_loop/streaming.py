@@ -11,12 +11,11 @@ Events are yielded in this order for a typical run::
     TokenEvent       a fragment of the final answer
     FinalEvent       the run is over
 """
-
-import uuid
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import uuid
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from react_loop.graph import build_react_graph
@@ -60,6 +59,36 @@ class FinalEvent:
 
 StreamEvent = ToolCallEvent | ToolResultEvent | TokenEvent | FinalEvent
 
+
+async def stream_events(
+    events: AsyncIterator[StreamEvent],
+    console: Any,
+) -> None:
+    """Render a stream of events to the console in real-time.
+
+    Tool calls and results are printed as panels; tokens are streamed
+    as a continuous block of text.
+    """
+    for event in events:
+        if isinstance(event, ToolCallEvent):
+            if hasattr(console, "print"):
+                console.print(f"[bold yellow]tool call[/] {event.name}({event.args})")
+            else:
+                print(f"TOOL CALL: {event.name}({event.args})")
+        elif isinstance(event, ToolResultEvent):
+            if hasattr(console, "print"):
+                console.print(f"[bold blue]tool result[/] {event.name}: {event.content[:200]}...")
+            else:
+                print(f"TOOL RESULT: {event.name}: {event.content[:200]}...")
+        elif isinstance(event, TokenEvent):
+            if hasattr(console, "print"):
+                console.print(event.text, end="")
+            else:
+                print(event.text, end="")
+        elif isinstance(event, FinalEvent):
+            pass
+
+StreamEvent = ToolCallEvent | ToolResultEvent | TokenEvent | FinalEvent
 
 def _token_of(chunk: Any) -> str:
     """Pull the text fragment out of a streamed chunk."""
@@ -116,55 +145,86 @@ class ReActStreamRunner:
         return config
 
     async def astream(
-        self, question: str, *, recursion_limit: int = 25, thread_id: str | None = None
+        self,
+        question: str,
+        *,
+        recursion_limit: int = 25,
+        thread_id: str | None = None,
+        approval_callback: Callable[[list[Any]], str | list[Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Run one question, yielding events as they happen.
+        """Run one question, yielding events as they happen, with HITL approval.
 
         Args:
             question: The user message to start from.
             recursion_limit: Maximum agent/tool rounds.
-            thread_id: Conversation to append to. Defaults to a fresh id, so
-                each call is independent; pass a fixed id to keep memory
-                across turns.
-
-        Yields:
-            :class:`ToolCallEvent`, :class:`ToolResultEvent`,
-            :class:`TokenEvent`, and finally one :class:`FinalEvent`.
-
+            thread_id: Conversation to append to.
+            approval_callback: A callback called before tool execution.
         """
+        config = self._config(recursion_limit, thread_id)
         start = {"messages": [HumanMessage(content=question)]}
         messages: list[AnyMessage] = []
         steps = 0
+        
+        # Initial run to reach the first interrupt or end
         async for mode, payload in self.graph.astream(
-            start,
-            config=self._config(recursion_limit, thread_id),
-            stream_mode=["messages", "updates"],
+            start, config=config, stream_mode=["messages", "updates"]
         ):
             if mode == "messages":
                 chunk, meta = payload
-                # The messages stream also carries ToolMessage output. Only the
-                # agent node produces answer text, so filter on the node name.
-                if meta.get("langgraph_node") != "agent":
-                    continue
-                text = _token_of(chunk)
-                if text:
-                    yield TokenEvent(text=text)
+                if meta.get("langgraph_node") == "agent":
+                    text = _token_of(chunk)
+                    if text: yield TokenEvent(text=text)
             elif mode == "updates":
                 for node, update in payload.items():
-                    if not isinstance(update, dict):
-                        continue
-                    # The agent node reports steps as an int via the reducer.
-                    steps += int(update.get("steps") or 0)
-                    for event in _events_from_update(node, update.get("messages", [])):
-                        yield event
-                    messages.extend(update.get("messages", []))
+                    if isinstance(update, dict):
+                        steps += int(update.get("steps") or 0)
+                        for event in _events_from_update(node, update.get("messages", [])):
+                            yield event
+                        messages.extend(update.get("messages", []))
+
+        while True:
+            snapshot = self.graph.get_state(config)
+            if not snapshot.next or "tools" not in snapshot.next:
+                break
+
+            if approval_callback:
+                last_msg = snapshot.values["messages"][-1]
+                tool_calls = getattr(last_msg, "tool_calls", [])
+                decision = await approval_callback(tool_calls)
+                
+                if decision == "approve":
+                    pass
+                elif decision == "cancel":
+                    cancel_msgs = [ToolMessage(tool_call_id=tc["id"], content="Cancelled by user") for tc in tool_calls]
+                    self.graph.update_state(config, {"messages": cancel_msgs})
+                elif isinstance(decision, list):
+                    new_msg = AIMessage(content=last_msg.content, tool_calls=decision)
+                    self.graph.update_state(config, {"messages": [new_msg]})
+                else:
+                    self.graph.update_state(config, {"messages": [ToolMessage(tool_call_id=tool_calls[0]["id"], content="Cancelled")]})
+
+            async for mode, payload in self.graph.astream(
+                None, config=config, stream_mode=["messages", "updates"]
+            ):
+                if mode == "messages":
+                    chunk, meta = payload
+                    if meta.get("langgraph_node") == "agent":
+                        text = _token_of(chunk)
+                        if text: yield TokenEvent(text=text)
+                elif mode == "updates":
+                    for node, update in payload.items():
+                        if isinstance(update, dict):
+                            steps += int(update.get("steps") or 0)
+                            for event in _events_from_update(node, update.get("messages", [])):
+                                yield event
+                            messages.extend(update.get("messages", []))
+
         answer = ""
         for message in reversed(messages):
             if isinstance(message, AIMessage) and not message.tool_calls:
                 answer = str(message.content)
                 break
         yield FinalEvent(messages=messages, answer=answer, steps=steps)
-
 
 def _events_from_update(node: str, new_messages: list[AnyMessage]) -> Iterator[StreamEvent]:
     """Turn one node's new messages into stream events."""

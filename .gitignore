@@ -17,3 +17,6 @@ wheels/
 .env
 .env.*
 !.env.example
+
+# Application logs
+logs/

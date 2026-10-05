@@ -12,6 +12,7 @@ act, repeat until the model stops asking for tools.
 """
 
 from collections.abc import Sequence
+from langchain_core.runnables import RunnableConfig
 from typing import Any, Literal
 
 from langchain_core.messages import SystemMessage
@@ -70,11 +71,19 @@ def build_react_graph(
     prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
     model = llm.bind_tools(tools) if tools else llm
 
-    def call_model(state: AgentState) -> dict[str, list[Any]]:
+    def call_model(state: AgentState, config: RunnableConfig) -> dict[str, list[Any]]:
         # Insert the system prompt fresh each turn so it is not duplicated
         # as the message history grows.
         messages = [SystemMessage(content=prompt), *state["messages"]]
+        
+        # Log the agent's thought process
+        import logging
+        session_id = config.get("configurable", {}).get("thread_id", "unknown")
+        logger = logging.getLogger(f"react_loop.session.{session_id}")
+        logger.info(f"Agent call with {len(messages)} messages")
+        
         response = model.invoke(messages)
+        logger.info(f"Agent response: {response.content} (Tool calls: {len(getattr(response, 'tool_calls', []))})")
         return {"messages": [response], "steps": 1}
 
     builder: StateGraph = StateGraph(AgentState)
@@ -91,4 +100,8 @@ def build_react_graph(
     else:
         # No tools: a single model call is the whole run.
         builder.add_edge("agent", END)
-    return builder.compile(checkpointer=checkpointer, name=name)
+    return builder.compile(
+        checkpointer=checkpointer,
+        name=name,
+        interrupt_before=["tools"],
+    )

@@ -31,7 +31,7 @@ def feed(lines: list[str]):
     """Return a read_line that yields ``lines`` and then raises EOFError."""
     remaining = iter(lines)
 
-    def read_line(_prompt: str) -> str:
+    async def read_line(_prompt: str) -> str:
         try:
             return next(remaining)
         except StopIteration:
@@ -194,13 +194,12 @@ def test_cli_chat_session_answers_offline(monkeypatch, capsys):
 
     lines = iter(["first question", "second question", "/exit"])
 
-    def ask(_prompt: str = "") -> str:
+    async def ask_async(_prompt: str = "") -> str:
         try:
             return next(lines)
         except StopIteration:
             raise EOFError from None
-
-    monkeypatch.setattr("builtins.input", ask)
+    monkeypatch.setattr("prompt_toolkit.PromptSession.prompt_async", ask_async)
 
     assert main(["--plain"]) == 0
     out = capsys.readouterr().out

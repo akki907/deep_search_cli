@@ -40,6 +40,7 @@ COMMANDS: dict[str, str] = {
     "/quit": "Alias for /exit.",
     "/clear": "Forget the conversation and start a new thread.",
     "/trace": "Replay the conversation so far.",
+    "/research": "Conduct an exhaustive deep research on the provided topic.",
 }
 
 EXIT_COMMANDS = frozenset({"/exit", "/quit"})
@@ -135,10 +136,30 @@ class ChatSession:
         )
         return final_answer(result["messages"])
 
-    async def astream(self, question: str) -> AsyncIterator[StreamEvent]:
+    async def aask(
+        self,
+        question: str,
+        approval_callback: Callable[[list[Any]], str | list[Any]] | None = None,
+    ) -> str:
+        """Run one turn with optional HITL approval and return the final answer."""
+        result = await self.runner.run_async(
+            question,
+            config={"configurable": {"thread_id": self._thread_id}},
+            approval_callback=approval_callback,
+            recursion_limit=self.recursion_limit,
+        )
+        return final_answer(result["messages"])
+    async def astream(
+        self,
+        question: str,
+        approval_callback: Callable[[list[Any]], str | list[Any]] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         """Run one turn, yielding stream events as they happen."""
         events = self.runner.astream(
-            question, recursion_limit=self.recursion_limit, thread_id=self._thread_id
+            question,
+            recursion_limit=self.recursion_limit,
+            thread_id=self._thread_id,
+            approval_callback=approval_callback,
         )
         async for event in events:
             yield event
@@ -147,7 +168,7 @@ class ChatSession:
 async def run_chat(
     session: ChatSession,
     *,
-    read_line: Callable[[str], str],
+    read_line: Callable[[str], Any],
     turn: Callable[[ChatSession, str], Any],
     write: Callable[[str], None] = print,
     show_trace: Callable[[list[AnyMessage]], None] | None = None,
@@ -172,7 +193,7 @@ async def run_chat(
     render_trace = show_trace or partial(print_plain_trace)
     while True:
         try:
-            line = read_line(PROMPT)
+            line = await read_line(PROMPT)
         except (EOFError, KeyboardInterrupt):
             # Ctrl-D and Ctrl-C both mean "we are done", not "something broke".
             write("")
@@ -188,15 +209,31 @@ async def run_chat(
                 return 0
             if command.name == "/help":
                 write(HELP_TEXT)
-            elif command.name == "/clear":
+                continue
+            if command.name == "/clear":
                 session.reset()
                 write("Conversation cleared.")
-            elif command.name == "/trace":
+                continue
+            if command.name == "/trace":
                 render_trace(session.messages())
+                continue
+            if command.name == "/research":
+                if not command.arg:
+                    write("Please provide a topic: /research <topic>")
+                    continue
+                
+                write(f"🔍 Deep researching: {command.arg}...")
+                research_prompt = (
+                    "You are a professional deep research agent. Your goal is to provide "
+                    "an exhaustive, detailed report on the topic. Do not stop at the first "
+                    "satisfactory answer. Search multiple sources, dig into details, "
+                    "and synthesize a comprehensive final answer."
+                )
+                text = f"[RESEARCH MODE]: {research_prompt}\n\nTopic: {command.arg}"
+                # Do NOT continue; let it fall through to the turn() call
             else:
                 write(f"Unknown command {command.name}. Type /help for the list.")
-            continue
-
+                continue
         try:
             await turn(session, text)
         except Exception as exc:

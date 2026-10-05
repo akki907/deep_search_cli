@@ -241,6 +241,37 @@ def wikipedia_summary(title: str) -> str:
     summary = _wiki_summary(title)
     return summary or f"No Wikipedia summary for {title!r}."
 
+@tool
+def delegate(agent_name: str, query: str) -> str:
+    """Delegate a task to a specialized agent. Use this when a specific persona 
+    (e.g. 'researcher', 'coder', 'writer') is better suited for the query.
+    
+    Args:
+        agent_name: The name of the agent to delegate to.
+        query: The specific question or task for the agent.
+    """
+    from react_loop.runner import ReActRunner, run_react
+    from react_loop.llm import build_llm
+
+    PERSONAS = {
+        "researcher": "You are a world-class research scientist. Provide exhaustive, evidence-backed answers with citations.",
+        "coder": "You are a senior software engineer. Provide concise, efficient, and bug-free code implementation.",
+        "writer": "You are a professional editor and writer. Focus on clarity, tone, and narrative flow.",
+    }
+
+    prompt = PERSONAS.get(agent_name.lower(), "You are a helpful specialized assistant.")
+    
+    # We run the sub-agent as a one-shot ReAct loop
+    result = run_react(
+        question=query,
+        system_prompt=prompt,
+        verbose=False
+    )
+    from react_loop.runner import final_answer
+    return f"[{agent_name}] {final_answer(result['messages'])}"
+
+
+
 
 ALL_TOOLS = [
     calculator,
@@ -249,4 +280,5 @@ ALL_TOOLS = [
     web_search,
     wikipedia_search,
     wikipedia_summary,
+    delegate,
 ]

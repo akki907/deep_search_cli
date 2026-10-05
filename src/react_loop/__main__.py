@@ -27,6 +27,10 @@ from react_loop.runner import ReActRunner
 from react_loop.streaming import ReActStreamRunner
 
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.formatted_text import HTML
+from react_loop.chat import COMMANDS
 def _run_streaming(
     llm: ReActModel, question: str, args: argparse.Namespace, console: Console, use_rich: bool
 ) -> int:
@@ -64,13 +68,36 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
         runner = ReActRunner(llm, system_prompt=args.system_prompt, checkpointer=saver)
 
     async def turn(session: ChatSession, question: str) -> None:
-        """Run one question and print the answer."""
+        """Run one question and print the answer, with HITL approval for tools."""
+        async def approve_tool(tool_calls: list[dict]) -> str | list[dict]:
+            for tc in tool_calls:
+                console.print(f"[bold yellow]⚠ Tool Call Request:[/] {tc['name']}({tc['args']})")
+            
+            choice = await prompt_session.prompt_async("[bold yellow]Approve? [A]pprove, [E]dit, [C]ancel: [/]")
+            choice = choice.strip().lower()
+            if choice.startswith('a'):
+                return "approve"
+            if choice.startswith('c'):
+                return "cancel"
+            if choice.startswith('e'):
+                # Simple edit: just ask for a new JSON string for the first tool call
+                # (In a real app, we'd loop through all tool calls)
+                new_args = await prompt_session.prompt_async("[bold yellow]Enter new args (JSON): [/]")
+                import json
+                try:
+                    args = json.loads(new_args)
+                    return [{**tool_calls[0], "args": args}]
+                except json.JSONDecodeError:
+                    console.print("[red]Invalid JSON. Cancelling tool call.[/]")
+                    return "cancel"
+            return "cancel"
+
         if streaming:
-            await stream_events(session.astream(question), console)
+            await stream_events(session.astream(question, approval_callback=approve_tool), console)
             print()
         else:
-            console.print(f"[bold green]assistant>[/] {session.ask(question)}")
-
+            answer = await session.aask(question, approval_callback=approve_tool)
+            console.print(f"[bold green]assistant>[/] {answer}")
     error_console = Console(stderr=True, force_terminal=True) if use_rich else None
 
     def on_error(exc: BaseException) -> None:
@@ -85,13 +112,12 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
         else:
             print_plain_trace(messages, console)
 
-    def read_line(_prompt: str) -> str:
-        # Rich's Prompt adds its own ': ' suffix, so the marker is drawn here
-        # and input() only reads. input() raises EOFError at end of input and
-        # KeyboardInterrupt on Ctrl-C, both of which end the session.
-        console.print(f"[bold cyan]{PROMPT.strip()}[/] ", end="")
-        return input()
+    # Use prompt_toolkit for autocomplete suggestions
+    completer = WordCompleter(list(COMMANDS.keys()), ignore_case=True)
+    prompt_session = PromptSession(completer=completer)
 
+    async def read_line(_prompt: str) -> str:
+        return await prompt_session.prompt_async(HTML('<cyan><b>you > </b></cyan>'))
     session = ChatSession(runner, recursion_limit=args.max_steps)
     provider, model = resolve_target(args.model, args.provider)
     console.print(banner(provider, model))
@@ -129,6 +155,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--demo",
         action="store_true",
         help="Run a canned offline ReAct trajectory (no API key needed)",
+    )
+    parser.add_argument(
+        "--deep-research",
+        action="store_true",
+        help="Run an exhaustive research loop on the topic",
     )
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
@@ -176,9 +207,14 @@ def _run_once(
         else:
             print_plain_trace(messages, console)
         print()
-    print(messages[-1].content)
-    return 0
 
+    final_text = messages[-1].content
+    if use_rich:
+        console.print(f"\n[bold green]Final Answer:[/]\n{final_text}")
+    else:
+        print(f"\nFinal Answer:\n{final_text}")
+
+    return 0
 
 def main(argv: list[str] | None = None) -> int:
     """Answer one question, or run an interactive session."""
@@ -192,7 +228,8 @@ def main(argv: list[str] | None = None) -> int:
     # No question and no demo means the user wants a session. Reading from a
     # pipe would look like a hang, so refuse instead of waiting for input that
     # is never coming.
-    interactive = not args.demo and not args.question
+    interactive = not args.demo and not args.question and not args.deep_research
+    deep_research_mode = args.deep_research
     if interactive and not sys.stdin.isatty():
         print(
             "error: no question given and stdin is not a terminal.\n"
@@ -222,8 +259,30 @@ def main(argv: list[str] | None = None) -> int:
     if interactive:
         return _run_chat(llm, args, console, use_rich)
 
+    if deep_research_mode:
+        # Use a specialized system prompt to force exhaustive research
+        research_prompt = (
+            "You are a professional deep research agent. Your goal is to provide "
+            "an exhaustive, detailed report on the topic. Do not stop at the first "
+            "satisfactory answer. Search multiple sources, dig into details, "
+            "and synthesize a comprehensive final answer."
+        )
+        from react_loop.runner import run_react
+        result = run_react(
+            question=question,
+            llm=llm,
+            system_prompt=research_prompt,
+            verbose=use_rich
+        )
+        if use_rich:
+            from react_loop.console import print_plain_trace
+            print_plain_trace(result["messages"])
+        else:
+            from react_loop.runner import trace
+            for line in trace(result["messages"]):
+                print(line)
+        return 0
+
     return _run_once(llm, question, args, console, use_rich)
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

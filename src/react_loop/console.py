@@ -155,6 +155,7 @@ async def stream_events(events: AsyncIterator[Any], console: Console | None = No
     con = console or get_console()
     live_enabled = con.is_terminal and not con.no_color
     answer: list[str] = []
+    first_token = True
     live = con.status("[bold green]thinking...", spinner="dots") if live_enabled else None
     if live is not None:
         live.start()
@@ -171,6 +172,9 @@ async def stream_events(events: AsyncIterator[Any], console: Console | None = No
                 preview = event.content.replace(chr(10), " ")[:TOOL_PREVIEW_CHARS]
                 con.print(f"[bold yellow]\u25b8 result[/] {preview}")
             elif isinstance(event, TokenEvent):
+                if first_token:
+                    await _settle(live)
+                    first_token = False
                 answer.append(event.text)
                 if live_enabled:
                     con.print(f"[green]{event.text}[/]", end="")

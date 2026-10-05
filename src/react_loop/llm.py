@@ -43,7 +43,6 @@ def load_env() -> None:
 #: ``openai`` keeps LangChain's own default base URL and reads ``OPENAI_API_KEY``.
 COMPATIBLE_PROVIDERS: dict[str, tuple[str | None, str, str]] = {
     "openai": (None, "OPENAI_API_KEY", "gpt-4o-mini"),
-    "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "openai/gpt-4o-mini"),
     "together": (
         "https://api.together.xyz/v1",
         "TOGETHER_API_KEY",
@@ -51,6 +50,7 @@ COMPATIBLE_PROVIDERS: dict[str, tuple[str | None, str, str]] = {
     ),
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", "llama-3.3-70b-versatile"),
     "ollama": ("http://localhost:11434/v1", "OLLAMA_API_KEY", "llama3.1"),
+    "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "stealth/space-bunny-alpha"),
 }
 
 
@@ -63,6 +63,8 @@ class ReActModel(Protocol):
 
     def invoke(self, messages: Sequence[BaseMessage], **kwargs: Any) -> AnyMessage:
         """Return the assistant message for the given conversation."""
+
+
 
 
 def _split_words(text: str) -> list[str]:
@@ -175,43 +177,16 @@ def resolve_target(
         The provider name, lowercased, and the model id if one was given.
 
     """
-    resolved = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
+    resolved = (provider or os.getenv("LLM_PROVIDER") or "ollama").lower()
     return resolved, model or os.getenv("REACT_MODEL") or os.getenv("LLM_MODEL")
 
 
-def build_llm(
+def _build_model(
+    provider: str,
     model: str | None = None,
     temperature: float = 0.0,
-    provider: str | None = None,
 ) -> ReActModel:
-    """Create a chat model from the environment.
-
-    ``provider`` is ``openai``, ``anthropic``, ``scripted``, or one of the
-    OpenAI-compatible endpoints in :data:`COMPATIBLE_PROVIDERS`
-    (``openrouter``, ``together``, ``groq``, ``ollama``). With no provider it
-    is read from ``LLM_PROVIDER``, defaulting to ``openai``. ``model`` falls
-    back to ``REACT_MODEL`` or ``LLM_MODEL``, then to the provider default.
-
-    For a compatible endpoint the key is read from that provider's own
-    variable, such as ``OPENROUTER_API_KEY`` for ``openrouter``. A missing key
-    is a :class:`ValueError` rather than a late failure at call time.
-
-    Args:
-        model: Model name, such as ``gpt-4o-mini`` or
-            ``stealth/space-bunny-alpha`` for OpenRouter.
-        temperature: Sampling temperature.
-        provider: Which provider to build.
-
-    Returns:
-        A model that satisfies :class:`ReActModel`.
-
-    Raises:
-        RuntimeError: If the provider package is not installed.
-        ValueError: If the provider name is unknown or its key is missing.
-
-    """
-    load_env()
-    provider, model = resolve_target(model, provider)
+    """Helper to build a single model from provider and model id."""
     if provider == "scripted":
         return ScriptedChatModel()
     if provider in COMPATIBLE_PROVIDERS:
@@ -233,7 +208,10 @@ def build_llm(
             kwargs["base_url"] = base_url
         if api_key:
             kwargs["api_key"] = api_key
+        elif provider == "ollama":
+            kwargs["api_key"] = "ollama"
         return ChatOpenAI(**kwargs)
+
     if provider == "anthropic":
         try:
             from langchain_anthropic import ChatAnthropic
@@ -243,3 +221,38 @@ def build_llm(
         return ChatAnthropic(model=model or "claude-sonnet-4-5", temperature=temperature)
     msg = f"Unknown provider: {provider!r}"
     raise ValueError(msg)
+
+
+def build_llm(
+    model: str | None = None,
+    temperature: float = 0.0,
+    provider: str | None = None,
+) -> ReActModel:
+    """Create a chat model from the environment.
+
+    ``provider`` is ``openai``, ``anthropic``, ``scripted``, or one of the
+    OpenAI-compatible endpoints in :data:`COMPATIBLE_PROVIDERS`
+    (``together``, ``groq``, ``ollama``). With no provider it
+    is read from ``LLM_PROVIDER``, defaulting to ``ollama``. ``model`` falls
+    back to ``REACT_MODEL`` or ``LLM_MODEL``, then to the provider default.
+
+    For a compatible endpoint the key is read from that provider's own
+    variable, such as ``TOGETHER_API_KEY`` for ``together``. A missing key
+    is a :class:`ValueError` rather than a late failure at call time.
+
+    Args:
+        model: Model name, such as ``gpt-4o-mini`` or
+            ``meta-llama/Llama-3-8b-chat-hf`` for Together.
+        temperature: Sampling temperature.
+        provider: Which provider to build.
+
+    Returns:
+        A model that satisfies :class:`ReActModel`.
+
+    Raises:
+        RuntimeError: If the provider package is not installed.
+        ValueError: If the provider name is unknown or its key is missing.
+    """
+    load_env()
+    provider, model = resolve_target(model, provider)
+    return _build_model(provider, model, temperature)
