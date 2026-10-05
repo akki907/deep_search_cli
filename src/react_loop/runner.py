@@ -1,7 +1,7 @@
 import asyncio
 import uuid
-from collections.abc import Sequence, Callable
 from typing import Any
+from collections.abc import Sequence, Callable, AsyncIterator
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -26,14 +26,15 @@ class ReActRunner:
         checkpointer: Any | None = None,
         name: str = "react_agent",
     ) -> None:
-        """Compile the ReAct graph for the given model and tools."""
-        # Initialize session logging
+        self.llm = llm
+        self.system_prompt = system_prompt
+        self.name = name
+        
         self.session_id = uuid.uuid4().hex[:8]
         self.logger = setup_session_logger(self.session_id)
         tool_names = [t.name for t in (tools or ALL_TOOLS)]
         self.logger.info(f"Starting session {self.session_id} with tools: {tool_names}")
-
-        # Interrupts require a checkpointer to save state.
+        
         cp = checkpointer or InMemorySaver()
         self.graph = build_react_graph(
             llm=llm,
@@ -121,6 +122,29 @@ class ReActRunner:
             return await self.run_async(question, config=config, approval_callback=auto_approve, recursion_limit=recursion_limit)
         
         return asyncio.run(_sync_wrap())
+    async def astream(
+        self,
+        question: str,
+        recursion_limit: int = 25,
+        thread_id: str | None = None,
+        approval_callback: Callable[[list[Any]], str | list[Any]] | None = None,
+    ) -> AsyncIterator[Any]:
+        """Delegate streaming to a ReActStreamRunner."""
+        from react_loop.streaming import ReActStreamRunner
+        streamer = ReActStreamRunner(
+            self.llm,
+            system_prompt=self.system_prompt,
+            checkpointer=self.checkpointer,
+            name=self.name,
+        )
+        async for event in streamer.astream(
+            question,
+            recursion_limit=recursion_limit,
+            thread_id=thread_id or self.session_id,
+            approval_callback=approval_callback,
+        ):
+            yield event
+
 
 
 def final_answer(messages: list[AnyMessage]) -> str:

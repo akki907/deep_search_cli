@@ -75,7 +75,7 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
             
             choice = await prompt_session.prompt_async("[bold yellow]Approve? [A]pprove, [E]dit, [C]ancel: [/]")
             choice = choice.strip().lower()
-            if choice.startswith('a'):
+            if choice.startswith('a') or choice == 'y':
                 return "approve"
             if choice.startswith('c'):
                 return "cancel"
@@ -90,14 +90,40 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
                 except json.JSONDecodeError:
                     console.print("[red]Invalid JSON. Cancelling tool call.[/]")
                     return "cancel"
+            console.print("[yellow]Tool call cancelled.[/]")
             return "cancel"
+
+        if session.debug_mode:
+            # Debug mode: step-through execution
+            console.print("[bold magenta]🐞 Debug Mode: Step-through enabled.[/]")
+            async for event in session.astream(question, approval_callback=approve_tool):
+                if hasattr(event, "name") and hasattr(event, "args"): # ToolCallEvent
+                    console.print(f"[bold yellow]Step: Agent requested {event.name}[/]")
+                    choice = await prompt_session.prompt_async("[bold magenta]Next? [Y]es / [S]teer: [/]")
+                    if choice.strip().lower().startswith('s'):
+                        steering = await prompt_session.prompt_async("[bold magenta]Steer (Enter new response): [/]")
+                        from langchain_core.messages import AIMessage
+                        session.inject_messages([AIMessage(content=steering)])
+                        console.print("[bold green]Steered. Terminating turn.[/]")
+                        break
+                elif hasattr(event, "content") and not hasattr(event, "text"): # ToolResultEvent
+                    console.print(f"[bold blue]Step: Tool {event.name} returned output.[/]")
+                    await prompt_session.prompt_async("[bold magenta]Press Enter to continue...[/]")
+                elif hasattr(event, "text"): # TokenEvent
+                    console.print(event.text, end="")
+                elif hasattr(event, "answer"): # FinalEvent
+                    console.print(f"\n[bold green]Final Answer:[/] {event.answer}")
+            print()
+            return
 
         if streaming:
             await stream_events(session.astream(question, approval_callback=approve_tool), console)
             print()
         else:
             answer = await session.aask(question, approval_callback=approve_tool)
-            console.print(f"[bold green]assistant>[/] {answer}")
+            from react_loop.console import render_markdown
+            console.print(f"[bold green]assistant>[/] ")
+            render_markdown(answer, console=console)
     error_console = Console(stderr=True, force_terminal=True) if use_rich else None
 
     def on_error(exc: BaseException) -> None:
@@ -117,7 +143,7 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
     prompt_session = PromptSession(completer=completer)
 
     async def read_line(_prompt: str) -> str:
-        return await prompt_session.prompt_async(HTML('<cyan><b>you > </b></cyan>'))
+        return await prompt_session.prompt_async(HTML('<style fg="cyan" bold="true">👤 you > </style>'))
     session = ChatSession(runner, recursion_limit=args.max_steps)
     provider, model = resolve_target(args.model, args.provider)
     console.print(banner(provider, model))
@@ -180,6 +206,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="WARNING",
         help="Log level for the Rich logger: DEBUG, INFO, WARNING, ERROR",
     )
+    parser.add_argument(
+        "--force-interactive",
+        action="store_true",
+        help="Force interactive mode even if stdin is not a terminal",
+    )
     return parser
 
 
@@ -230,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     # is never coming.
     interactive = not args.demo and not args.question and not args.deep_research
     deep_research_mode = args.deep_research
-    if interactive and not sys.stdin.isatty():
+    if interactive and not sys.stdin.isatty() and not args.force_interactive:
         print(
             "error: no question given and stdin is not a terminal.\n"
             "Pass a question, use --demo, or run react-loop in an interactive shell.",

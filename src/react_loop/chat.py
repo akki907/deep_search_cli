@@ -35,12 +35,13 @@ PROMPT = "you > "
 #: Commands understood at the prompt. Kept in one place so that /help and the
 #: dispatch in :func:`run_chat` cannot drift apart.
 COMMANDS: dict[str, str] = {
-    "/help": "Show these commands.",
-    "/exit": "Leave the session. Ctrl-D does the same.",
-    "/quit": "Alias for /exit.",
-    "/clear": "Forget the conversation and start a new thread.",
-    "/trace": "Replay the conversation so far.",
+    "/help": "Show this list of commands",
+    "/clear": "Clear the current conversation history",
+    "/trace": "Print the full conversation trace",
     "/research": "Conduct an exhaustive deep research on the provided topic.",
+    "/save": "Save the current session to database",
+    "/load": "Load a session by thread ID: /load <id>",
+    "/debug": "Toggle interactive debug mode (step-through)",
 }
 
 EXIT_COMMANDS = frozenset({"/exit", "/quit"})
@@ -54,6 +55,7 @@ class Command:
 
     name: str
     arg: str = ""
+
 
 
 def parse_command(line: str) -> Command | None:
@@ -103,6 +105,13 @@ class ChatSession:
         self.runner = runner
         self.recursion_limit = recursion_limit
         self._thread_id = thread_id or uuid.uuid4().hex
+    debug_mode: bool = False
+
+    def set_debug(self, enabled: bool):
+        self.debug_mode = enabled
+    def set_debug(self, enabled: bool):
+        self.debug_mode = enabled
+
 
     @property
     def thread_id(self) -> str:
@@ -123,11 +132,17 @@ class ChatSession:
         self._thread_id = uuid.uuid4().hex
 
     def messages(self) -> list[AnyMessage]:
-        """Return every message in the current thread, oldest first."""
         if not self.remembers:
             return []
-        state = self.runner.graph.get_state({"configurable": {"thread_id": self._thread_id}})
+        state = self.runner.graph.get_state({"configurable": {"thread_id": self.thread_id}})
         return list((state.values or {}).get("messages", []))
+
+    def inject_messages(self, messages: list[AnyMessage]):
+        """Manually insert messages into the graph state."""
+        self.runner.graph.update_state(
+            {"configurable": {"thread_id": self.thread_id}},
+            {"messages": messages}
+        )
 
     def ask(self, question: str) -> str:
         """Run one turn to completion and return the final answer."""
@@ -216,6 +231,30 @@ async def run_chat(
                 continue
             if command.name == "/trace":
                 render_trace(session.messages())
+                continue
+            if command.name == "/save":
+                from react_loop.persistence import SessionManager
+                sm = SessionManager()
+                sm.save_session(session.thread_id, session.messages())
+                write(f"Session saved as {session.thread_id}.")
+                continue
+            if command.name == "/load":
+                if not command.arg:
+                    write("Please provide a thread ID: /load <id>")
+                    continue
+                from react_loop.persistence import SessionManager
+                sm = SessionManager()
+                msgs = sm.load_session(command.arg)
+                if msgs:
+                    session._thread_id = command.arg
+                    session.inject_messages(msgs)
+                    write(f"Session {command.arg} loaded.")
+                else:
+                    write(f"Session {command.arg} not found.")
+                continue
+            if command.name == "/debug":
+                session.set_debug(not session.debug_mode)
+                write(f"Debug mode {'enabled' if session.debug_mode else 'disabled'}.")
                 continue
             if command.name == "/research":
                 if not command.arg:

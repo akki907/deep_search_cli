@@ -100,6 +100,32 @@ def get_current_time() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+@tool
+def python_executor(code: str) -> str:
+    """Execute Python code locally and return the output. Use with caution.
+
+    Args:
+        code: The Python code to execute.
+    """
+    import subprocess
+    import sys
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            input=None,
+        )
+        output = (result.stdout + result.stderr).strip()
+        return output or "Code executed successfully with no output."
+    except subprocess.TimeoutExpired:
+        return "Error: Code execution timed out after 10 seconds."
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 #: One tool call must not flood the context window, so result counts are capped
 #: no matter what the model asks for.
 MAX_SEARCH_RESULTS = 5
@@ -271,14 +297,18 @@ def delegate(agent_name: str, query: str) -> str:
     return f"[{agent_name}] {final_answer(result['messages'])}"
 
 
-
-
 ALL_TOOLS = [
     calculator,
     search_knowledge_base,
     get_current_time,
+    python_executor,
     web_search,
     wikipedia_search,
     wikipedia_summary,
     delegate,
 ]
+
+
+
+
+

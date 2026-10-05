@@ -69,24 +69,37 @@ async def stream_events(
     Tool calls and results are printed as panels; tokens are streamed
     as a continuous block of text.
     """
-    for event in events:
-        if isinstance(event, ToolCallEvent):
-            if hasattr(console, "print"):
-                console.print(f"[bold yellow]tool call[/] {event.name}({event.args})")
-            else:
-                print(f"TOOL CALL: {event.name}({event.args})")
-        elif isinstance(event, ToolResultEvent):
-            if hasattr(console, "print"):
-                console.print(f"[bold blue]tool result[/] {event.name}: {event.content[:200]}...")
-            else:
-                print(f"TOOL RESULT: {event.name}: {event.content[:200]}...")
-        elif isinstance(event, TokenEvent):
-            if hasattr(console, "print"):
+    from react_loop.console import (
+        COLOR_TOOL_CALL,
+        COLOR_TOOL_RESULT,
+        COLOR_AGENT,
+        STYLE_BOLD,
+    )
+    from rich.panel import Panel
+
+    # We use a status spinner to indicate that the agent is "thinking" or "working"
+    # when we expect a tool call or result to follow.
+    with console.status("[bold green]Thinking...", spinner="dots"):
+        async for event in events:
+            if isinstance(event, ToolCallEvent):
+                console.print(f"\n[{STYLE_BOLD} {COLOR_TOOL_CALL}] Tool Call: {event.name}({event.args})")
+            elif isinstance(event, ToolResultEvent):
+                console.print(Panel(
+                    event.content,
+                    title=f"[{STYLE_BOLD} {COLOR_TOOL_RESULT}] Result: {event.name}",
+                    border_style=COLOR_TOOL_RESULT,
+                    expand=False,
+                ))
+            elif isinstance(event, TokenEvent):
+                # Tokens are printed immediately. 
+                # We use a subtle prefix for the first token of a response if needed,
+                # but usually, the main loop handles the "assistant > " prefix.
                 console.print(event.text, end="")
-            else:
-                print(event.text, end="")
-        elif isinstance(event, FinalEvent):
-            pass
+            elif isinstance(event, FinalEvent):
+                pass
+
+    # Ensure a trailing newline after the stream finishes
+    console.print()
 
 StreamEvent = ToolCallEvent | ToolResultEvent | TokenEvent | FinalEvent
 

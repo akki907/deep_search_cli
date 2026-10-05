@@ -29,6 +29,18 @@ from react_loop.streaming import (
 #: Tool results are long. Clip them in the panel view only.
 TOOL_PREVIEW_CHARS = 400
 
+
+#: UI Style Guide
+COLOR_USER = "cyan"
+COLOR_AGENT = "green"
+COLOR_TOOL_CALL = "yellow"
+COLOR_TOOL_RESULT = "blue"
+COLOR_DEBUG = "magenta"
+COLOR_ERROR = "red"
+
+STYLE_BOLD = "bold"
+STYLE_DIM = "dim"
+
 log = logging.getLogger("react_loop")
 
 
