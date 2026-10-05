@@ -1,0 +1,57 @@
+[project]
+name = "react-loop"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Akash", email = "ak.akki907@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "langchain-core>=1.6.6",
+    "ddgs>=9.16.0",
+    "langgraph>=1.2.12",
+    "python-dotenv>=1.0.0",
+    "rich>=13.9.0",
+    "requests>=2.32.0",
+]
+
+[project.optional-dependencies]
+openai = [
+    "langchain-openai>=1.6.7",
+]
+anthropic = [
+    "langchain-anthropic>=1.7.5",
+]
+
+[project.scripts]
+react-loop = "react_loop.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RET", "C4", "PL", "RUF", "D"]
+ignore = ["D203", "D213", "D401", "PLR0913"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may omit return annotations and keep imports local for clarity.
+"tests/*" = ["D", "ANN", "PL", "SIM117", "B011", "RUF"]
+# Optional provider and search imports must stay lazy and inside the function.
+"src/react_loop/llm.py" = ["PLC0415"]
+"src/react_loop/tools.py" = ["PLC0415"]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
+]
