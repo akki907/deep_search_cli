@@ -103,6 +103,27 @@ def test_web_search_reports_failure_as_text(monkeypatch):
     assert "No results found." in out
 
 
+def test_web_search_falls_back_to_google_after_primary_failure(monkeypatch):
+    calls: list[str] = []
+
+    class FlakyDDGS:
+        def __init__(self, timeout=None) -> None:
+            self.timeout = timeout
+
+        def text(self, _query, **kwargs):
+            calls.append(kwargs["backend"])
+            if kwargs["backend"] == "duckduckgo":
+                raise RuntimeError("No results found.")
+            return [{"title": "Fallback hit", "href": "https://example.com", "body": "A result."}]
+
+    monkeypatch.setattr("ddgs.DDGS", FlakyDDGS)
+
+    out = web_search.invoke({"query": "SQLite PostgreSQL"})
+
+    assert calls == ["duckduckgo", "google"]
+    assert "Fallback hit" in out
+
+
 def test_wikipedia_search_lists_titles_with_summaries(monkeypatch):
     payload = search_payload("Ada Lovelace", "Analytical Engine")
 

@@ -472,3 +472,56 @@ def test_load_env_is_safe_without_python_dotenv(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     llm_module.load_env()
 
+
+
+def test_cli_deep_research_uses_research_prompt_and_requested_budget(monkeypatch, capsys):
+    from react_loop.__main__ import main
+
+    calls = {}
+
+    monkeypatch.setattr("react_loop.__main__.build_llm", lambda **_kwargs: object())
+
+    def fake_run_react(**kwargs):
+        calls.update(kwargs)
+        return {
+            "messages": [
+                HumanMessage(content="Compare databases."),
+                AIMessage(content="A structured research report."),
+            ]
+        }
+
+    monkeypatch.setattr("react_loop.runner.run_react", fake_run_react)
+
+    assert (
+        main(
+            [
+                "--deep-research",
+                "--max-steps",
+                "7",
+                "--no-trace",
+                "--plain",
+                "Compare databases.",
+            ]
+        )
+        == 0
+    )
+
+    assert calls["recursion_limit"] == 7
+    assert calls["verbose"] is False
+    assert "stock_market_data" in calls["system_prompt"]
+    assert "bear/base/bull" in calls["system_prompt"]
+    output = capsys.readouterr().out
+    assert "A structured research report." in output
+    assert "user      >" not in output
+
+
+def test_cli_deep_research_requires_a_topic(monkeypatch, capsys):
+    from react_loop.__main__ import main
+
+    monkeypatch.setattr(
+        "react_loop.__main__.build_llm",
+        lambda **_kwargs: pytest.fail("must validate the topic before building the model"),
+    )
+
+    assert main(["--deep-research", "--plain"]) == 2
+    assert "requires a research topic" in capsys.readouterr().err

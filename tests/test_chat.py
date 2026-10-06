@@ -207,3 +207,26 @@ def test_cli_chat_session_answers_offline(monkeypatch, capsys):
     assert "I have heard 1 questions" in out
     # The second answer is only right if the first turn was remembered.
     assert "I have heard 2 questions" in out
+
+
+def test_research_command_marks_turn_as_deep_research():
+    from react_loop.research import DEEP_RESEARCH_SYSTEM_PROMPT
+
+    session = make_session()
+    asked: list[str] = []
+
+    async def capture(_session: ChatSession, question: str) -> None:
+        asked.append(question)
+
+    written, _, code = record(
+        session,
+        ["/research Compare SQLite and PostgreSQL.", "/exit"],
+        turn=capture,
+    )
+
+    assert code == 0
+    assert asked == [
+        f"[RESEARCH MODE]\n{DEEP_RESEARCH_SYSTEM_PROMPT}\n\n"
+        "Topic: Compare SQLite and PostgreSQL."
+    ]
+    assert written == ["🔍 Deep researching: Compare SQLite and PostgreSQL...."]

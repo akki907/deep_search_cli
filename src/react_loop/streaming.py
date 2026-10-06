@@ -16,7 +16,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import uuid
+
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from react_loop.graph import build_react_graph
 from react_loop.llm import ReActModel
@@ -142,14 +144,15 @@ class ReActStreamRunner:
         name: str = "react_stream_agent",
     ) -> None:
         """Compile the ReAct graph for streaming."""
+        saver = checkpointer or InMemorySaver()
         self.graph = build_react_graph(
             llm=llm,
             tools=ALL_TOOLS if tools is None else tools,
             system_prompt=system_prompt,
-            checkpointer=checkpointer,
+            checkpointer=saver,
             name=name,
         )
-        self.checkpointer = checkpointer
+        self.checkpointer = saver
 
     def _config(self, recursion_limit: int, thread_id: str | None = None) -> dict[str, Any]:
         config: dict[str, Any] = {"recursion_limit": recursion_limit}

@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deep Search CLI — Application Demo</title>
+  <style>
+    :root {
+      --bg: #08111f;
+      --bg-deep: #050b14;
+      --panel: rgba(16, 31, 53, .78);
+      --panel-solid: #102039;
+      --line: rgba(161, 190, 226, .2);
+      --text: #eef5ff;
+      --muted: #9db0c9;
+      --cyan: #5de4ff;
+      --blue: #7ca9ff;
+      --green: #5ee0a0;
+      --yellow: #ffd166;
+      --pink: #ff82c4;
+      --red: #ff7e8f;
+      --shadow: 0 28px 80px rgba(0, 0, 0, .34);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 82% 12%, rgba(93, 228, 255, .13), transparent 30%),
+        radial-gradient(circle at 12% 88%, rgba(124, 169, 255, .12), transparent 34%),
+        var(--bg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .deck {
+      height: 100%;
+      position: relative;
+      isolation: isolate;
+    }
+
+    .ambient {
+      position: fixed;
+      inset: auto -10vw -22vh auto;
+      width: 52vw;
+      height: 52vw;
+      border: 1px solid rgba(93, 228, 255, .13);
+      border-radius: 50%;
+      box-shadow: 0 0 0 5vw rgba(93, 228, 255, .025), 0 0 0 10vw rgba(93, 228, 255, .018);
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      display: none;
+      padding: clamp(28px, 5vw, 76px) clamp(28px, 7vw, 112px) 92px;
+      overflow: auto;
+      animation: enter .34s ease both;
+    }
+    .slide.active { display: block; }
+    @keyframes enter { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+    .slide-inner { max-width: 1280px; min-height: 100%; margin: 0 auto; display: flex; flex-direction: column; justify-content: center; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      width: fit-content;
+      color: var(--cyan);
+      text-transform: uppercase;
+      letter-spacing: .16em;
+      font-size: 12px;
+      font-weight: 800;
+      margin-bottom: 18px;
+    }
+    .eyebrow::before { content: ""; width: 24px; height: 2px; background: var(--cyan); box-shadow: 8px 0 var(--cyan); }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { max-width: 900px; margin-bottom: 22px; font-size: clamp(48px, 8vw, 104px); line-height: .96; letter-spacing: -.06em; }
+    h2 { max-width: 900px; margin-bottom: 14px; font-size: clamp(34px, 5vw, 68px); line-height: 1; letter-spacing: -.045em; }
+    h3 { font-size: 20px; margin-bottom: 9px; }
+    .lead { max-width: 700px; color: var(--muted); font-size: clamp(18px, 2.1vw, 27px); line-height: 1.4; }
+    .gradient { background: linear-gradient(110deg, var(--text), var(--cyan) 62%, var(--blue)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .muted { color: var(--muted); }
+    .small { font-size: 13px; color: var(--muted); }
+
+    .title-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: clamp(32px, 7vw, 100px); align-items: center; }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+    .badge { border: 1px solid var(--line); border-radius: 999px; padding: 9px 14px; color: var(--muted); background: rgba(255,255,255,.035); font-size: 13px; }
+    .badge strong { color: var(--text); }
+    .orbital { min-height: 420px; position: relative; display: grid; place-items: center; }
+    .orbital::before, .orbital::after { content: ""; position: absolute; border: 1px solid rgba(93, 228, 255, .3); border-radius: 50%; transform: rotate(-24deg); }
+    .orbital::before { width: 360px; height: 160px; }
+    .orbital::after { width: 330px; height: 230px; transform: rotate(58deg); border-color: rgba(124,169,255,.3); }
+    .core { width: 164px; height: 164px; border-radius: 42px; display: grid; place-items: center; text-align: center; background: linear-gradient(145deg, #1b4368, #0d1d35); border: 1px solid rgba(93,228,255,.65); box-shadow: 0 0 70px rgba(93,228,255,.2), inset 0 0 28px rgba(93,228,255,.11); transform: rotate(-8deg); }
+    .core span { transform: rotate(8deg); font-size: 25px; font-weight: 800; letter-spacing: -.05em; }
+    .node { position: absolute; padding: 11px 15px; border: 1px solid var(--line); border-radius: 12px; background: rgba(16,32,57,.9); color: var(--muted); font-size: 12px; box-shadow: var(--shadow); }
+    .node b { color: var(--text); display: block; font-size: 13px; margin-bottom: 2px; }
+    .node.one { top: 8%; right: 6%; } .node.two { bottom: 12%; right: 1%; } .node.three { bottom: 5%; left: 6%; }
+
+    .section-head { margin-bottom: 30px; }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .card { padding: 24px; border: 1px solid var(--line); border-radius: 18px; background: linear-gradient(145deg, rgba(22,43,73,.84), rgba(11,24,43,.72)); box-shadow: var(--shadow); }
+    .card .num { color: var(--cyan); font: 800 13px ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 22px; }
+    .card p { color: var(--muted); line-height: 1.55; margin-bottom: 0; }
+    .icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; margin-bottom: 18px; color: var(--bg); font-weight: 900; background: var(--cyan); }
+    .icon.green { background: var(--green); } .icon.yellow { background: var(--yellow); } .icon.pink { background: var(--pink); }
+
+    .flow { display: grid; grid-template-columns: repeat(5, 1fr); align-items: center; gap: 10px; margin-top: 28px; }
+    .flow-step { position: relative; min-height: 155px; padding: 20px 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+    .flow-step:not(:last-child)::after { content: "→"; position: absolute; right: -18px; top: 56px; color: var(--cyan); font-size: 25px; z-index: 1; }
+    .flow-step .step-no { color: var(--cyan); font: 800 12px ui-monospace, monospace; }
+    .flow-step strong { display: block; margin: 14px 0 8px; font-size: 17px; }
+    .flow-step span { color: var(--muted); font-size: 13px; line-height: 1.4; }
+    .callout { margin-top: 28px; padding: 17px 20px; border-left: 3px solid var(--green); background: rgba(94,224,160,.08); color: #c5ead7; border-radius: 0 12px 12px 0; }
+
+    .terminal { overflow: hidden; border: 1px solid rgba(161,190,226,.25); border-radius: 16px; background: #07101c; box-shadow: var(--shadow); }
+    .terminal-bar { display: flex; align-items: center; gap: 7px; padding: 13px 16px; border-bottom: 1px solid rgba(161,190,226,.14); color: var(--muted); font-size: 12px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--red); } .dot:nth-child(2) { background: var(--yellow); } .dot:nth-child(3) { background: var(--green); }
+    .terminal-body { padding: 23px; font: 14px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace; color: #c7d7eb; }
+    .prompt { color: var(--cyan); } .cmd { color: var(--text); } .out { color: var(--green); } .dim { color: #6e809a; } .warn { color: var(--yellow); }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; align-items: stretch; }
+
+    .demo-grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 22px; align-items: stretch; }
+    .transcript { padding: 23px; border: 1px solid var(--line); border-radius: 16px; background: rgba(5,13,24,.74); font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .line { display: grid; grid-template-columns: 86px 1fr; gap: 10px; margin: 7px 0; }
+    .line .who { color: var(--muted); } .line.user .who { color: var(--cyan); } .line.agent .who { color: var(--green); } .line.tool .who { color: var(--yellow); }
+    .approval { display: flex; flex-direction: column; justify-content: center; padding: 24px; border: 1px solid rgba(255,209,102,.35); border-radius: 16px; background: linear-gradient(145deg, rgba(88,67,21,.42), rgba(31,27,16,.65)); }
+    .approval .shield { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 16px; background: var(--yellow); color: var(--bg); font-size: 24px; margin-bottom: 18px; }
+    .approval p { color: #eadfb9; line-height: 1.55; }
+    .approval .rule { padding-top: 15px; border-top: 1px solid rgba(255,209,102,.2); color: var(--yellow); font: 12px ui-monospace, monospace; }
+
+    .tool-list { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 25px; }
+    .tool { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+    .tool strong { display: block; margin-bottom: 7px; } .tool span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .tool .tool-mark { color: var(--cyan); font: 800 12px ui-monospace, monospace; margin-bottom: 15px; }
+
+    .closing { max-width: 850px; }
+    .checklist { display: grid; gap: 12px; margin: 28px 0 0; padding: 0; list-style: none; }
+    .checklist li { display: flex; align-items: center; gap: 13px; color: #d7e4f4; font-size: 18px; }
+    .checklist li::before { content: "✓"; display: grid; place-items: center; width: 25px; height: 25px; border-radius: 50%; color: var(--bg); background: var(--green); font-weight: 900; }
+
+    .footer { position: fixed; left: clamp(28px, 7vw, 112px); right: clamp(28px, 7vw, 112px); bottom: 25px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 12px; z-index: 5; }
+    .progress { position: fixed; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255,255,255,.08); z-index: 6; }
+    .progress span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--cyan), var(--blue)); transition: width .3s ease; }
+    .dots { display: flex; gap: 6px; }
+    .dots button { width: 7px; height: 7px; padding: 0; border: 0; border-radius: 50%; background: #4c6079; cursor: pointer; }
+    .dots button.active { width: 22px; border-radius: 9px; background: var(--cyan); }
+    .hint { color: #71859f; }
+
+    @media (max-width: 850px) {
+      .title-grid, .demo-grid, .two-col { grid-template-columns: 1fr; }
+      .orbital { min-height: 280px; transform: scale(.8); margin: -30px 0; }
+      .cards { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .flow-step { min-height: auto; }
+      .flow-step:not(:last-child)::after { content: "↓"; right: 50%; top: auto; bottom: -25px; }
+      .tool-list { grid-template-columns: repeat(2, 1fr); }
+      .slide { padding-bottom: 80px; }
+    }
+    @media (max-width: 520px) {
+      .tool-list { grid-template-columns: 1fr; }
+      h1 { font-size: 50px; }
+      .footer .hint { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="deck" aria-label="Deep Search CLI presentation">
+    <div class="ambient" aria-hidden="true"></div>
+
+    <section class="slide active" data-title="Deep Search CLI">
+      <div class="slide-inner title-grid">
+        <div>
+          <div class="eyebrow">Application demo · 01</div>
+          <h1><span class="gradient">Deep Search</span><br>CLI</h1>
+          <p class="lead">A local, tool-using AI agent that reasons through a question, asks for human approval, and returns a grounded answer.</p>
+          <div class="badge-row">
+            <span class="badge"><strong>Model</strong> qwen2.5-coder:7b</span>
+            <span class="badge"><strong>Runtime</strong> Ollama</span>
+            <span class="badge"><strong>Interface</strong> Terminal</span>
+          </div>
+        </div>
+        <div class="orbital" aria-hidden="true">
+          <div class="core"><span>ReAct<br>agent</span></div>
+          <div class="node one"><b>Local model</b>Ollama + Qwen</div>
+          <div class="node two"><b>Tools</b>calculator · search</div>
+          <div class="node three"><b>Human loop</b>approve once</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="What it does">
+      <div class="slide-inner">
+        <div class="section-head">
+          <div class="eyebrow">The product · 02</div>
+          <h2>Ask a question.<br><span class="gradient">Get an action plan.</span></h2>
+          <p class="lead">The agent does not only generate text. It can choose a tool, observe the result, and continue the reasoning loop.</p>
+        </div>
+        <div class="cards">
+          <article class="card"><div class="icon">01</div><h3>Understand</h3><p>Receives a natural-language question and decides whether a direct answer is enough.</p></article>
+          <article class="card"><div class="icon green">02</div><h3>Act</h3><p>Requests a calculator, knowledge-base search, Python, web, Wikipedia, or delegation tool.</p></article>
+          <article class="card"><div class="icon yellow">03</div><h3>Answer</h3><p>Combines tool results into a concise final response in the terminal.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="ReAct loop">
+      <div class="slide-inner">
+        <div class="eyebrow">Architecture · 03</div>
+        <h2>The <span class="gradient">ReAct loop</span></h2>
+        <p class="lead">One graph. Two core nodes. A controlled loop from reasoning to action and back.</p>
+        <div class="flow">
+          <div class="flow-step"><span class="step-no">01 / INPUT</span><strong>User</strong><span>Natural-language question enters the session.</span></div>
+          <div class="flow-step"><span class="step-no">02 / THINK</span><strong>Agent</strong><span>Qwen chooses a direct answer or a tool call.</span></div>
+          <div class="flow-step"><span class="step-no">03 / CHECK</span><strong>Approval</strong><span>Human confirms a tool the first time it is used.</span></div>
+          <div class="flow-step"><span class="step-no">04 / ACT</span><strong>Tools</strong><span>The selected function runs and returns an observation.</span></div>
+          <div class="flow-step"><span class="step-no">05 / LOOP</span><strong>Answer</strong><span>The agent synthesizes the result and finishes.</span></div>
+        </div>
+        <div class="callout">Design principle: keep the model flexible, keep side effects visible, and keep the human in control of tool execution.</div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Run it locally">
+      <div class="slide-inner">
+        <div class="eyebrow">Quick start · 04</div>
+        <h2>Runs locally with <span class="gradient">one command</span></h2>
+        <div class="two-col">
+          <div class="terminal">
+            <div class="terminal-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:8px">terminal</span></div>
+            <div class="terminal-body">
+              <div><span class="prompt">$</span> <span class="cmd">ollama list</span></div>
+              <div class="out">qwen2.5-coder:7b&nbsp;&nbsp;4.7 GB</div>
+              <br>
+              <div><span class="prompt">$</span> <span class="cmd">uv run python -m react_loop</span></div>
+              <div class="out">react-loop&nbsp;&nbsp;provider: ollama</div>
+              <div class="out">model: qwen2.5-coder:7b</div>
+              <div class="dim">Type /help for commands, /exit to quit.</div>
+              <br>
+              <div><span class="prompt">you &gt;</span> <span class="cmd">What is 2 + 2?</span></div>
+              <div class="out">The answer to 2 + 2 is 4.</div>
+            </div>
+          </div>
+          <div class="card" style="display:flex; flex-direction:column; justify-content:center">
+            <div class="icon pink">ENV</div>
+            <h3>Configuration is explicit</h3>
+            <p><code>LLM_PROVIDER=ollama</code><br><code>REACT_MODEL=qwen2.5-coder:7b</code></p>
+            <p class="small">The model tag must match the model installed in Ollama exactly.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Live run">
+      <div class="slide-inner">
+        <div class="eyebrow">Observed run · 05</div>
+        <h2>A real question, <span class="gradient">two tools</span></h2>
+        <div class="demo-grid">
+          <div class="transcript">
+            <div class="line user"><span class="who">you &gt;</span><span>Express shipping costs $15 per order. How much is it for 3 items, and what is the refund window?</span></div>
+            <div class="line agent"><span class="who">agent</span><span>call search_knowledge_base({ query: "refund policy" })</span></div>
+            <div class="line tool"><span class="who">tool</span><span>Refunds are available within 30 days of purchase.</span></div>
+            <div class="line agent"><span class="who">agent</span><span>call calculator({ expression: "15 * 3" })</span></div>
+            <div class="line tool"><span class="who">tool</span><span>45</span></div>
+            <div class="line agent"><span class="who">assistant</span><span>The shipping cost for 3 items is $45, and the refund window is 30 days from the purchase date.</span></div>
+          </div>
+          <div class="approval">
+            <div class="shield">✓</div>
+            <h3>Grounded output</h3>
+            <p>The final answer contains the calculator result and the policy retrieved from the local knowledge base.</p>
+            <div class="rule">TRACEABLE · TOOL-FIRST · HUMAN-AWARE</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Approval memory">
+      <div class="slide-inner">
+        <div class="eyebrow">Human in the loop · 06</div>
+        <h2>Approve once.<br><span class="gradient">Keep moving.</span></h2>
+        <p class="lead">An approval is remembered by tool name for the rest of the interactive process.</p>
+        <div class="demo-grid" style="margin-top:28px">
+          <div class="terminal">
+            <div class="terminal-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:8px">approval flow</span></div>
+            <div class="terminal-body">
+              <div><span class="prompt">you &gt;</span> What is 2 + 2?</div>
+              <div class="warn">Tool Call Request: calculator({ expression: '2 + 2' })</div>
+              <div><span class="warn">Approve? [A]pprove, [E]dit, [C]ancel:</span> a</div>
+              <div class="out">The answer to 2 + 2 is 4.</div>
+              <br>
+              <div><span class="prompt">you &gt;</span> What is 3 + 3?</div>
+              <div class="dim">calculator request approved from session memory</div>
+              <div class="out">The answer to 3 + 3 is 6.</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="icon green">∞</div>
+            <h3>Safe by default</h3>
+            <p>New tools still require a decision. Approved tools do not interrupt repeated work.</p>
+            <p class="small">Edited calls and cancellations remain one-off decisions. Restarting the CLI clears the memory.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Toolbox">
+      <div class="slide-inner">
+        <div class="eyebrow">Capabilities · 07</div>
+        <h2>A small toolbox with <span class="gradient">clear boundaries</span></h2>
+        <p class="lead">Tools are exposed to the model through structured calls, then executed by the application.</p>
+        <div class="tool-list">
+          <div class="tool"><div class="tool-mark">01</div><strong>calculator</strong><span>Safe arithmetic expressions.</span></div>
+          <div class="tool"><div class="tool-mark">02</div><strong>knowledge base</strong><span>Shipping and refund policy lookup.</span></div>
+          <div class="tool"><div class="tool-mark">03</div><strong>python executor</strong><span>Run focused Python calculations.</span></div>
+          <div class="tool"><div class="tool-mark">04</div><strong>current time</strong><span>Return the current local time.</span></div>
+          <div class="tool"><div class="tool-mark">05</div><strong>web search</strong><span>Network-backed research when enabled.</span></div>
+          <div class="tool"><div class="tool-mark">06</div><strong>Wikipedia</strong><span>Search and summarize reference content.</span></div>
+          <div class="tool"><div class="tool-mark">07</div><strong>delegate</strong><span>Hand a focused task to a specialist.</span></div>
+          <div class="tool"><div class="tool-mark">08</div><strong>trace</strong><span>Inspect the agent/tool conversation.</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Demo script">
+      <div class="slide-inner">
+        <div class="eyebrow">Presenter mode · 08</div>
+        <h2>The three-minute <span class="gradient">demo script</span></h2>
+        <div class="cards">
+          <article class="card"><div class="num">01 / SHOW</div><h3>Start local</h3><p>Launch the CLI and show the provider/model banner. Explain that inference is running through Ollama.</p></article>
+          <article class="card"><div class="num">02 / ASK</div><h3>Use two tools</h3><p>Ask the shipping and refund question. Approve the first tool request and show the trace.</p></article>
+          <article class="card"><div class="num">03 / REPEAT</div><h3>Prove memory</h3><p>Ask a second calculator question. The tool runs without a second approval prompt.</p></article>
+        </div>
+        <div class="terminal" style="margin-top:22px">
+          <div class="terminal-body"><span class="prompt">$</span> <span class="cmd">uv run python -m react_loop</span><br><span class="dim">Tip: use /help, /trace, /clear, and /exit during the session.</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Takeaways">
+      <div class="slide-inner closing">
+        <div class="eyebrow">Close · 09</div>
+        <h2>Local intelligence.<br><span class="gradient">Visible actions.</span></h2>
+        <p class="lead">Deep Search CLI turns a local coding model into a practical research assistant without hiding the work it performs.</p>
+        <ul class="checklist">
+          <li>Local Qwen model served by Ollama</li>
+          <li>Structured ReAct loop with tool results</li>
+          <li>Human approval for new tools</li>
+          <li>Remembered approval for repeated tools</li>
+        </ul>
+      </div>
+    </section>
+
+    <div class="footer">
+      <span id="slide-title">Deep Search CLI</span>
+      <span class="hint">← → navigate · Home / End jump · F fullscreen · ? help</span>
+      <span id="counter">1 / 9</span>
+      <div class="dots" id="dots" aria-label="Slide navigation"></div>
+    </div>
+    <div class="progress"><span id="progress-bar"></span></div>
+  </main>
+
+  <script>
+    (() => {
+      const slides = [...document.querySelectorAll('.slide')];
+      const counter = document.getElementById('counter');
+      const title = document.getElementById('slide-title');
+      const progress = document.getElementById('progress-bar');
+      const dots = document.getElementById('dots');
+      let index = 0;
+
+      slides.forEach((slide, i) => {
+        const dot = document.createElement('button');
+        dot.type = 'button';
+        dot.title = `${i + 1}: ${slide.dataset.title}`;
+        dot.setAttribute('aria-label', dot.title);
+        dot.addEventListener('click', () => show(i));
+        dots.appendChild(dot);
+      });
+
+      function show(next) {
+        index = (next + slides.length) % slides.length;
+        slides.forEach((slide, i) => slide.classList.toggle('active', i === index));
+        [...dots.children].forEach((dot, i) => dot.classList.toggle('active', i === index));
+        counter.textContent = `${index + 1} / ${slides.length}`;
+        title.textContent = slides[index].dataset.title;
+        progress.style.width = `${((index + 1) / slides.length) * 100}%`;
+        history.replaceState(null, '', `#${index + 1}`);
+      }
+
+      function help() {
+        window.alert('Keyboard controls:\n\n← / → or PageUp / PageDown: change slide\nHome / End: first or last slide\nF: toggle fullscreen\nEscape: leave fullscreen');
+      }
+
+      document.addEventListener('keydown', (event) => {
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return;
+        if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') show(index + 1);
+        else if (event.key === 'ArrowLeft' || event.key === 'PageUp') show(index - 1);
+        else if (event.key === 'Home') show(0);
+        else if (event.key === 'End') show(slides.length - 1);
+        else if (event.key.toLowerCase() === 'f') {
+          if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+          else document.exitFullscreen?.();
+        } else if (event.key === '?') help();
+      });
+
+      document.querySelector('.deck').addEventListener('click', (event) => {
+        if (event.target.closest('button, a, code')) return;
+        if (event.clientX > window.innerWidth * .65) show(index + 1);
+        if (event.clientX < window.innerWidth * .25) show(index - 1);
+      });
+
+      const hash = Number.parseInt(location.hash.slice(1), 10);
+      show(Number.isFinite(hash) && hash > 0 ? hash - 1 : 0);
+    })();
+  </script>
+</body>
+</html>

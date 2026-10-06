@@ -5,10 +5,8 @@ piping to a file or a test keeps working. This module adds colour, panels, and
 structured logging for a real terminal.
 """
 
-import asyncio
 import logging
 import os
-import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -28,6 +26,13 @@ from react_loop.streaming import (
 
 #: Tool results are long. Clip them in the panel view only.
 TOOL_PREVIEW_CHARS = 400
+
+def _clip_tool_text(text: str) -> str:
+    """Clip tool output without ending in the middle of a word."""
+    if len(text) <= TOOL_PREVIEW_CHARS:
+        return text
+    clipped = text[:TOOL_PREVIEW_CHARS].rsplit(None, 1)[0]
+    return f"{clipped.rstrip()}..."
 
 
 #: UI Style Guide
@@ -65,7 +70,6 @@ def setup_logging(level: str | int = "INFO", *, force_terminal: bool | None = No
         force_terminal: Passed to :class:`rich.console.Console`.
 
     """
-    import logging
     if isinstance(level, str):
         level = getattr(logging, level.upper(), logging.INFO)
     handler = RichHandler(
@@ -97,22 +101,21 @@ def _panel_for(message: AnyMessage) -> Panel | None:
             calls = "\n".join(
                 f"[bold]{call['name']}[/]([cyan]{call['args']}[/])" for call in message.tool_calls
             )
-            return Panel(calls, title="[bold magenta]assistant · tool call[/]", border_style="magenta")
+            return Panel(
+                calls,
+                title="[bold magenta]assistant · tool call[/]",
+                border_style="magenta",
+            )
         return Panel(
             Markdown(str(message.content)),
             title="[bold green]assistant[/]",
             border_style="green",
         )
     if isinstance(message, ToolMessage):
-        text = str(message.content)
-        clipped = (
-            text[:TOOL_PREVIEW_CHARS] + "..."
-            if len(text) > TOOL_PREVIEW_CHARS
-            else text
-        )
+        clipped = _clip_tool_text(str(message.content))
         return Panel(
-            clipped,
-            title=f"[bold yellow]tool · {message.name}[/]",
+            Markdown(clipped),
+            title=f"[bold yellow]tool \u00b7 {message.name}[/]",
             border_style="yellow",
         )
     return None
@@ -126,12 +129,12 @@ def render_messages(messages: list[AnyMessage]) -> Group:
 
 def print_trace(messages: list[AnyMessage], console: Console | None = None) -> None:
     """Print the loop as Rich panels."""
-    (console or get_console()).print(render_messages(messages))
+    (console if console is not None else get_console()).print(render_messages(messages))
 
 
 def print_error(exc: BaseException, console: Console | None = None) -> None:
     """Print an error in a red panel."""
-    (console or get_console()).print(
+    (console if console is not None else get_console()).print(
         Panel(str(exc), title="[bold red]error[/]", border_style="red")
     )
 
@@ -142,7 +145,7 @@ def print_plain_trace(messages: list[AnyMessage], console: Console | None = None
     Used when output is redirected, so logs and test assertions keep the
     ``user >`` / ``assistant>`` / ``tool <`` format of :func:`trace`.
     """
-    con = console or get_console(force_terminal=False)
+    con = console if console is not None else get_console(force_terminal=False)
     styles = {"user": "blue", "assistant": "green", "tool": "yellow"}
     for line in trace(messages):
         style = next((s for k, s in styles.items() if line.startswith(k)), "white")
@@ -150,11 +153,12 @@ def print_plain_trace(messages: list[AnyMessage], console: Console | None = None
 
 
 async def stream_events(events: AsyncIterator[Any], console: Console | None = None) -> str:
-    """Render a stream of events live, returning the final answer.
+    """Render a stream of events and the final answer as Markdown.
 
-    Tool calls and results are printed above a live answer line. Tokens appear
-    as they arrive. When the output is not a terminal the text is written
-    without cursor control, so redirected output stays readable.
+    Tool calls and results are printed as they arrive. Answer tokens are
+    buffered so the completed response can be parsed as one Markdown document;
+    rendering each fragment independently would corrupt headings, lists, and
+    fenced code blocks.
 
     Args:
         events: An async iterator of stream events.
@@ -164,10 +168,9 @@ async def stream_events(events: AsyncIterator[Any], console: Console | None = No
         The full answer text.
 
     """
-    con = console or get_console()
+    con = console if console is not None else get_console()
     live_enabled = con.is_terminal and not con.no_color
     answer: list[str] = []
-    first_token = True
     live = con.status("[bold green]thinking...", spinner="dots") if live_enabled else None
     if live is not None:
         live.start()
@@ -181,25 +184,34 @@ async def stream_events(events: AsyncIterator[Any], console: Console | None = No
                 )
             elif isinstance(event, ToolResultEvent):
                 await _settle(live)
-                preview = event.content.replace(chr(10), " ")[:TOOL_PREVIEW_CHARS]
-                con.print(f"[bold yellow]\u25b8 result[/] {preview}")
-            elif isinstance(event, TokenEvent):
-                if first_token:
-                    await _settle(live)
-                    first_token = False
-                answer.append(event.text)
+                preview = _clip_tool_text(event.content)
                 if live_enabled:
-                    con.print(f"[green]{event.text}[/]", end="")
+                    con.print(
+                        Panel(
+                            Markdown(preview),
+                            title=f"[bold yellow]\u25b8 result \u00b7 {event.name}[/]",
+                            border_style=COLOR_TOOL_RESULT,
+                            expand=False,
+                        )
+                    )
                 else:
-                    sys.stdout.write(event.text)
-                    sys.stdout.flush()
+                    con.print(
+                        f"\u25b8 result {event.name}: {preview.replace(chr(10), ' ')}",
+                        highlight=False,
+                    )
+            elif isinstance(event, TokenEvent):
+                answer.append(event.text)
             elif isinstance(event, FinalEvent):
-                if live_enabled:
-                    con.print()
+                await _settle(live)
     finally:
         if live is not None:
             live.stop()
-    return "".join(answer)
+
+    answer_text = "".join(answer)
+    if answer_text:
+        con.print("[bold green]assistant>[/]")
+        render_markdown(answer_text, console=con)
+    return answer_text
 
 
 async def _settle(live: Any) -> None:
@@ -227,11 +239,10 @@ def render_markdown(text: str, console: Console | None = None) -> str:
         the raw markdown-processed string.
 
     """
-    from rich.markdown import Markdown
-
-    con = console or get_console(force_terminal=False)
-    # When not a terminal we strip ANSI codes so the result is file-safe.
-    # Use a Pygments style that exists; None falls back to Rich's default.
+    con = console if console is not None else get_console(force_terminal=False)
+    # ``export_text`` only works for consoles created with ``record=True``.
+    # Interactive CLI consoles are not recording consoles, but rendering the
+    # answer must still succeed.
     rendered = Markdown(text, code_theme="solarized-dark" if con.is_terminal else None)
     con.print(rendered)
-    return con.export_text()
+    return con.export_text(clear=False) if getattr(con, "record", False) else str(text)

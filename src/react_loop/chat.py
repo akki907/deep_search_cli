@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.messages import AnyMessage
 
 from react_loop.console import print_error, print_plain_trace
+from react_loop.research import DEEP_RESEARCH_SYSTEM_PROMPT
 from react_loop.runner import final_answer
 from react_loop.streaming import StreamEvent
 
@@ -260,15 +261,12 @@ async def run_chat(
                 if not command.arg:
                     write("Please provide a topic: /research <topic>")
                     continue
-                
+
                 write(f"🔍 Deep researching: {command.arg}...")
-                research_prompt = (
-                    "You are a professional deep research agent. Your goal is to provide "
-                    "an exhaustive, detailed report on the topic. Do not stop at the first "
-                    "satisfactory answer. Search multiple sources, dig into details, "
-                    "and synthesize a comprehensive final answer."
+                text = (
+                    f"[RESEARCH MODE]\n{DEEP_RESEARCH_SYSTEM_PROMPT}\n\n"
+                    f"Topic: {command.arg}"
                 )
-                text = f"[RESEARCH MODE]: {research_prompt}\n\nTopic: {command.arg}"
                 # Do NOT continue; let it fall through to the turn() call
             else:
                 write(f"Unknown command {command.name}. Type /help for the list.")

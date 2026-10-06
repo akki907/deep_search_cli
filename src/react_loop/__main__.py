@@ -10,9 +10,13 @@ import sys
 
 from langchain_core.messages import AnyMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.formatted_text import HTML
 from rich.console import Console
+from rich.text import Text
 
-from react_loop.chat import PROMPT, ChatSession, banner, run_chat
+from react_loop.chat import COMMANDS, ChatSession, banner, run_chat
 from react_loop.console import (
     get_console,
     print_error,
@@ -23,19 +27,31 @@ from react_loop.console import (
 )
 from react_loop.demo import DEMO_QUESTION, DEMO_SCRIPT
 from react_loop.llm import ReActModel, ScriptedChatModel, build_llm, resolve_target
-from react_loop.runner import ReActRunner
+from react_loop.research import DEEP_RESEARCH_SYSTEM_PROMPT
+from react_loop.runner import ReActRunner, final_answer
 from react_loop.streaming import ReActStreamRunner
 
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.formatted_text import HTML
-from react_loop.chat import COMMANDS
+def _prompt(text: str, color: str, rich: bool) -> str | HTML:
+    """Format a prompt for prompt_toolkit without exposing invalid markup."""
+    if not rich:
+        return text
+    return HTML(f"<style fg='{color}' bold='true'>{text}</style>")
+
 def _run_streaming(
-    llm: ReActModel, question: str, args: argparse.Namespace, console: Console, use_rich: bool
+    llm: ReActModel,
+    question: str,
+    args: argparse.Namespace,
+    console: Console,
+    use_rich: bool,
+    *,
+    system_prompt: str | None = None,
 ) -> int:
     """Run one question with token streaming. Returns an exit code."""
-    runner = ReActStreamRunner(llm, system_prompt=args.system_prompt)
+    runner = ReActStreamRunner(
+        llm,
+        system_prompt=args.system_prompt if system_prompt is None else system_prompt,
+    )
     try:
         asyncio.run(
             stream_events(runner.astream(question, recursion_limit=args.max_steps), console)
@@ -67,31 +83,55 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
     else:
         runner = ReActRunner(llm, system_prompt=args.system_prompt, checkpointer=saver)
 
+    approved_tools: set[str] = set()
+
+    async def approve_tool(tool_calls: list[dict]) -> str | list[dict]:
+        """Approve each tool once per interactive process.
+
+        Explicit approvals are remembered by tool name. Edited calls stay
+        one-off because their arguments are specific to the current request;
+        cancellations are also not remembered so the user can approve a later
+        request intentionally.
+        """
+        if tool_calls and all(tc["name"] in approved_tools for tc in tool_calls):
+            names = ", ".join(sorted({tc["name"] for tc in tool_calls}))
+            console.print(f"[dim]↳ Using remembered approval: {names}[/]")
+            return "approve"
+
+        for tc in tool_calls:
+            request = Text("⚠ Tool Call Request: ", style="bold yellow")
+            request.append(f"{tc['name']}({tc['args']})")
+            console.print(request)
+
+        approval_prompt = _prompt(
+            "Approve? [A]pprove, [E]dit, [C]ancel: ", "yellow", use_rich
+        )
+        choice = await prompt_session.prompt_async(approval_prompt)
+        choice = choice.strip().lower()
+        if choice.startswith("a") or choice == "y":
+            approved_tools.update(tc["name"] for tc in tool_calls)
+            names = ", ".join(sorted({tc["name"] for tc in tool_calls}))
+            console.print(f"[green]✓ Approved for this session:[/] {names}")
+            return "approve"
+        if choice.startswith("c"):
+            return "cancel"
+        if choice.startswith("e"):
+            # Simple edit: just ask for a new JSON string for the first tool call.
+            # Edited calls are not remembered because their arguments are one-off.
+            edit_prompt = _prompt("Enter new args (JSON): ", "yellow", use_rich)
+            new_args = await prompt_session.prompt_async(edit_prompt)
+            import json
+            try:
+                args = json.loads(new_args)
+                return [{**tool_calls[0], "args": args}]
+            except json.JSONDecodeError:
+                console.print("[red]Invalid JSON. Cancelling tool call.[/]")
+                return "cancel"
+        console.print("[yellow]Tool call cancelled.[/]")
+        return "cancel"
+
     async def turn(session: ChatSession, question: str) -> None:
         """Run one question and print the answer, with HITL approval for tools."""
-        async def approve_tool(tool_calls: list[dict]) -> str | list[dict]:
-            for tc in tool_calls:
-                console.print(f"[bold yellow]⚠ Tool Call Request:[/] {tc['name']}({tc['args']})")
-            
-            choice = await prompt_session.prompt_async("[bold yellow]Approve? [A]pprove, [E]dit, [C]ancel: [/]")
-            choice = choice.strip().lower()
-            if choice.startswith('a') or choice == 'y':
-                return "approve"
-            if choice.startswith('c'):
-                return "cancel"
-            if choice.startswith('e'):
-                # Simple edit: just ask for a new JSON string for the first tool call
-                # (In a real app, we'd loop through all tool calls)
-                new_args = await prompt_session.prompt_async("[bold yellow]Enter new args (JSON): [/]")
-                import json
-                try:
-                    args = json.loads(new_args)
-                    return [{**tool_calls[0], "args": args}]
-                except json.JSONDecodeError:
-                    console.print("[red]Invalid JSON. Cancelling tool call.[/]")
-                    return "cancel"
-            console.print("[yellow]Tool call cancelled.[/]")
-            return "cancel"
 
         if session.debug_mode:
             # Debug mode: step-through execution
@@ -99,16 +139,25 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
             async for event in session.astream(question, approval_callback=approve_tool):
                 if hasattr(event, "name") and hasattr(event, "args"): # ToolCallEvent
                     console.print(f"[bold yellow]Step: Agent requested {event.name}[/]")
-                    choice = await prompt_session.prompt_async("[bold magenta]Next? [Y]es / [S]teer: [/]")
-                    if choice.strip().lower().startswith('s'):
-                        steering = await prompt_session.prompt_async("[bold magenta]Steer (Enter new response): [/]")
+                    next_prompt = _prompt(
+                        "Next? [Y]es / [S]teer: ", "magenta", use_rich
+                    )
+                    choice = await prompt_session.prompt_async(next_prompt)
+                    if choice.strip().lower().startswith("s"):
+                        steer_prompt = _prompt(
+                            "Steer (Enter new response): ", "magenta", use_rich
+                        )
+                        steering = await prompt_session.prompt_async(steer_prompt)
                         from langchain_core.messages import AIMessage
                         session.inject_messages([AIMessage(content=steering)])
                         console.print("[bold green]Steered. Terminating turn.[/]")
                         break
                 elif hasattr(event, "content") and not hasattr(event, "text"): # ToolResultEvent
                     console.print(f"[bold blue]Step: Tool {event.name} returned output.[/]")
-                    await prompt_session.prompt_async("[bold magenta]Press Enter to continue...[/]")
+                    continue_prompt = _prompt(
+                        "Press Enter to continue... ", "magenta", use_rich
+                    )
+                    await prompt_session.prompt_async(continue_prompt)
                 elif hasattr(event, "text"): # TokenEvent
                     console.print(event.text, end="")
                 elif hasattr(event, "answer"): # FinalEvent
@@ -147,6 +196,7 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
     session = ChatSession(runner, recursion_limit=args.max_steps)
     provider, model = resolve_target(args.model, args.provider)
     console.print(banner(provider, model))
+
     return asyncio.run(
         run_chat(
             session,
@@ -275,6 +325,9 @@ def main(argv: list[str] | None = None) -> int:
         llm = ScriptedChatModel(script=list(DEMO_SCRIPT))
     else:
         question = " ".join(args.question)
+    if deep_research_mode and not question.strip():
+        print("error: --deep-research requires a research topic.", file=sys.stderr)
+        return 2
     try:
         llm = llm or build_llm(
             model=args.model, temperature=args.temperature, provider=args.provider
@@ -291,27 +344,50 @@ def main(argv: list[str] | None = None) -> int:
         return _run_chat(llm, args, console, use_rich)
 
     if deep_research_mode:
-        # Use a specialized system prompt to force exhaustive research
-        research_prompt = (
-            "You are a professional deep research agent. Your goal is to provide "
-            "an exhaustive, detailed report on the topic. Do not stop at the first "
-            "satisfactory answer. Search multiple sources, dig into details, "
-            "and synthesize a comprehensive final answer."
-        )
+        research_prompt = DEEP_RESEARCH_SYSTEM_PROMPT
+        if args.system_prompt:
+            research_prompt += f"\n\nAdditional instructions:\n{args.system_prompt}"
+
+        if args.stream:
+            return _run_streaming(
+                llm,
+                question,
+                args,
+                console,
+                use_rich,
+                system_prompt=research_prompt,
+            )
+
         from react_loop.runner import run_react
-        result = run_react(
-            question=question,
-            llm=llm,
-            system_prompt=research_prompt,
-            verbose=use_rich
-        )
+
+        try:
+            result = run_react(
+                question=question,
+                llm=llm,
+                system_prompt=research_prompt,
+                recursion_limit=args.max_steps,
+                verbose=False,
+            )
+        except Exception as exc:
+            if use_rich:
+                print_error(exc, Console(stderr=True, force_terminal=True))
+            else:
+                print(f"error: the agent stopped early: {exc}", file=sys.stderr)
+            return 1
+
+        messages = result["messages"]
+        if not args.no_trace:
+            if use_rich:
+                print_trace(messages, console)
+            else:
+                print_plain_trace(messages, console)
+            print()
+
+        final_text = final_answer(messages)
         if use_rich:
-            from react_loop.console import print_plain_trace
-            print_plain_trace(result["messages"])
+            console.print(f"\n[bold green]Final Answer:[/]\n{final_text}")
         else:
-            from react_loop.runner import trace
-            for line in trace(result["messages"]):
-                print(line)
+            print(f"\nFinal Answer:\n{final_text}")
         return 0
 
     return _run_once(llm, question, args, console, use_rich)

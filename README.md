@@ -62,6 +62,56 @@ uv run python -m react_loop "How much is express shipping for 3 items?"
 Useful flags: `--provider` (`openai`, `openrouter`, `together`, `groq`,
 `ollama`, `anthropic`, `scripted`), `--model`, `--temperature`, `--max-steps`,
 `--no-trace`.
+In an interactive session, approving a tool remembers that approval for the
+rest of the process, so repeated requests for the same tool do not prompt
+again. Edited calls and cancellations remain one-off decisions.
+
+### Deep research
+
+Use `--deep-research` for a structured, evidence-focused report instead of a
+normal answer:
+
+```bash
+uv run python -m react_loop --deep-research \
+  "Compare SQLite and PostgreSQL for a small multi-user web application."
+```
+
+Research mode instructs the agent to:
+
+- decompose the topic into research questions;
+- use Wikipedia for stable background and web search for current or primary
+  sources;
+- consult multiple independent sources when available;
+- distinguish evidence, synthesis, contradictions, and uncertainty;
+- return an executive summary, findings, caveats, and numbered sources.
+
+It honors `--max-steps`, `--no-trace`, `--stream`, and `--system-prompt`:
+
+```bash
+uv run python -m react_loop --deep-research --max-steps 40 --no-trace \
+  "What are the current tradeoffs between serverless and container deployments?"
+```
+
+The interactive session supports the same workflow with
+`/research <topic>`. A topic is required for command-line deep research.
+
+### Stock research and price scenarios
+
+Deep research automatically includes `stock_market_data` for stock and ETF
+topics. It retrieves a bounded quote and daily-price summary from the Yahoo
+Finance chart endpoint, then combines that data with web research about
+earnings, filings, guidance, competition, macro conditions, and recent news.
+
+```bash
+uv run python -m react_loop --deep-research \
+  "Research Microsoft (MSFT) and estimate bear, base, and bull 12-month price scenarios."
+```
+
+For a requested forecast, the agent must report the data timestamp, forecast
+horizon, assumptions, evidence, risks, and scenario ranges. It must not claim
+certainty or provide personalized buy, sell, or hold instructions. Market data
+can be delayed, unavailable, or incorrect; verify important figures against
+official filings and investor-relations sources before making decisions.
 
 ### With OpenRouter
 
@@ -136,7 +186,7 @@ runner = ReActRunner(build_llm(), tools=[get_order_status])
 | `src/react_loop/llm.py` | The `ReActModel` protocol, the offline `ScriptedChatModel`, and `build_llm`. |
 | `src/react_loop/console.py` | Rich panels, the Rich logger, and live stream rendering. |
 | `src/react_loop/streaming.py` | `ReActStreamRunner` and the typed stream events. | |
-| `src/react_loop/tools.py` | Demo tools: a safe calculator, a help-centre search, current time. |
+| `src/react_loop/tools.py` | Demo, web-search, Wikipedia, and stock-market-data tools. |
 | `src/react_loop/runner.py` | `ReActRunner`, plus `trace` and `final_answer` helpers. |
 | `src/react_loop/demo.py` | The canned offline trajectory used by `--demo`. |
 
@@ -150,6 +200,9 @@ runner = ReActRunner(build_llm(), tools=[get_order_status])
   `{"configurable": {"thread_id": "..."}}` config on each call.
 - **Tool errors.** `ToolNode` returns the error text to the model instead of
   crashing, so the agent can correct itself on the next turn.
+- **Web search.** `web_search` tries DuckDuckGo first and falls back to Google
+  once after a backend failure. If both fail, it returns an actionable error to
+  the model instead of asking it to repeat the same failed query.
 - **System prompt.** It is prepended fresh on each agent call, so it never
   accumulates in the message history.
 - **Prebuilt option.** LangGraph also ships `create_react_agent`, which wraps this

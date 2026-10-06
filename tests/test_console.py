@@ -3,10 +3,11 @@
 import asyncio
 
 from langchain_core.messages import AIMessage
+from rich.console import Console
 
 from react_loop.console import stream_events
 from react_loop.llm import ScriptedChatModel
-from react_loop.streaming import ReActStreamRunner
+from react_loop.streaming import FinalEvent, ReActStreamRunner, TokenEvent
 from react_loop.tools import calculator
 
 
@@ -65,3 +66,18 @@ def test_spinner_is_settled_before_the_answer_is_printed():
 
     assert settled, "the spinner was never stopped"
     assert min(settled) < first_print
+
+
+def test_stream_renders_the_completed_answer_as_markdown():
+    console = Console(record=True, force_terminal=False, width=80)
+
+    async def events():
+        yield TokenEvent(text="# Findings\n\n**SQLite** is embedded.")
+        yield FinalEvent(messages=[], answer="# Findings\n\n**SQLite** is embedded.", steps=1)
+
+    asyncio.run(stream_events(events(), console))
+
+    output = console.export_text()
+    assert "Findings" in output
+    assert "SQLite is embedded." in output
+    assert "**SQLite**" not in output

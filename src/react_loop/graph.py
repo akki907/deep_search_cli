@@ -103,5 +103,5 @@ def build_react_graph(
     return builder.compile(
         checkpointer=checkpointer,
         name=name,
-        interrupt_before=["tools"],
+        interrupt_before=["tools"] if tools else None,
     )

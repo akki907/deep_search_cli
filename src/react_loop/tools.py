@@ -1,14 +1,17 @@
 """Tools available to the ReAct agent.
 
 The calculator, clock, and help-centre search are offline and side-effect
-free. :func:`web_search` and :func:`wikipedia_search` reach the network, so
-they are imported lazily and report a failure as text the model can read
-rather than raising. Replace any of them with your own ``@tool`` functions.
+free. :func:`web_search`, :func:`wikipedia_search`, and
+:func:`stock_market_data` reach the network, so they are imported lazily and
+report a failure as text the model can read rather than raising. Replace any
+of them with your own ``@tool`` functions.
 """
 
 import ast
 import operator
+import re
 from datetime import UTC, datetime
+from statistics import fmean
 from typing import Any
 
 from langchain_core.tools import tool
@@ -156,10 +159,118 @@ def _clip(text: str) -> str:
     """Truncate a snippet, marking that it was cut."""
     return text if len(text) <= SNIPPET_CHARS else text[:SNIPPET_CHARS] + "..."
 
+STOCK_API_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
+STOCK_PERIODS = frozenset({"1mo", "3mo", "6mo", "1y", "2y", "5y", "max"})
+STOCK_SYMBOL_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9.-]{0,11}")
+
+
+@tool
+def stock_market_data(symbol: str, period: str = "1y") -> str:
+    """Fetch a bounded quote and daily-price summary for a stock or ETF.
+
+    This is market data for research and scenario analysis, not a guaranteed
+    forecast or investment recommendation. Use web_search separately for
+    earnings, filings, news, and business fundamentals.
+
+    Args:
+        symbol: Ticker symbol such as ``AAPL`` or ``MSFT``.
+        period: History window: ``1mo``, ``3mo``, ``6mo``, ``1y``, ``2y``,
+            ``5y``, or ``max``.
+
+    """
+    import requests
+
+    ticker = symbol.strip().upper()
+    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+        return f"Error: invalid stock symbol {symbol!r}."
+    if period not in STOCK_PERIODS:
+        allowed = ", ".join(sorted(STOCK_PERIODS))
+        return f"Error: invalid period {period!r}; choose one of: {allowed}."
+
+    try:
+        response = requests.get(
+            f"{STOCK_API_URL}/{ticker}",
+            params={"range": period, "interval": "1d", "events": "history"},
+            headers={"User-Agent": USER_AGENT},
+            timeout=SEARCH_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        return f"Error: stock data unavailable for {ticker}: {exc}"
+
+    result = (payload.get("chart", {}).get("result") or [None])[0]
+    if not result:
+        return f"Error: no market data returned for {ticker}."
+
+    meta = result.get("meta") or {}
+    timestamps = result.get("timestamp") or []
+    quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = quote.get("close") or []
+    volumes = quote.get("volume") or []
+    observations: list[tuple[str, float, int]] = []
+    for index, (timestamp, close) in enumerate(zip(timestamps, closes, strict=False)):
+        if close is None:
+            continue
+        try:
+            price = float(close)
+            date = datetime.fromtimestamp(int(timestamp), UTC).date().isoformat()
+        except (TypeError, ValueError, OverflowError):
+            continue
+        volume = volumes[index] if index < len(volumes) and volumes[index] else 0
+        observations.append((date, price, int(volume)))
+
+    if not observations:
+        return f"Error: no usable daily prices returned for {ticker}."
+
+    prices = [price for _, price, _ in observations]
+    first_price = prices[0]
+    last_price = prices[-1]
+    period_change = ((last_price / first_price) - 1) * 100 if first_price else 0.0
+    previous_close = meta.get("previousClose")
+    market_price = meta.get("regularMarketPrice")
+    as_of = meta.get("regularMarketTime")
+    if as_of:
+        try:
+            as_of_text = datetime.fromtimestamp(int(as_of), UTC).isoformat()
+        except (TypeError, ValueError, OverflowError):
+            as_of_text = observations[-1][0]
+    else:
+        as_of_text = observations[-1][0]
+    volume_values = [volume for _, _, volume in observations if volume]
+    average_volume = fmean(volume_values) if volume_values else 0.0
+    quote_text = f"{float(market_price):.2f}" if market_price is not None else f"{last_price:.2f}"
+    previous_text = (
+        f"{float(previous_close):.2f}" if previous_close is not None else "unavailable"
+    )
+
+    lines = [
+        f"Symbol: {ticker}",
+        "Data source: Yahoo Finance chart endpoint",
+        f"Exchange: {meta.get('exchangeName') or 'unavailable'}",
+        f"Currency: {meta.get('currency') or 'unavailable'}",
+        f"As of: {as_of_text} UTC",
+        f"Current/last price: {quote_text}",
+        f"Previous close: {previous_text}",
+        f"History window: {period}",
+        f"Observations: {len(observations)} daily closes",
+        f"Period change: {period_change:.2f}%",
+        f"Period high: {max(prices):.2f}",
+        f"Period low: {min(prices):.2f}",
+        f"Average daily volume: {average_volume:.0f}",
+        "Recent daily closes:",
+    ]
+    lines.extend(f"- {date}: {price:.2f}" for date, price, _ in observations[-10:])
+    return "\n".join(lines)
+
 
 @tool
 def web_search(query: str, max_results: int = 3) -> str:
-    """Search the web with DuckDuckGo and return titles, links, and snippets.
+    """Search the web and return bounded titles, links, and snippets.
+
+    DuckDuckGo is tried first. A Google-backed DDGS search is used once when
+    the primary backend fails, which handles transient rate limits without
+    making the model repeat the same failed call.
 
     Use this for current events, documentation, and anything outside the help
     knowledge base. Prefer wikipedia_search for encyclopedic facts.
@@ -171,14 +282,19 @@ def web_search(query: str, max_results: int = 3) -> str:
     """
     from ddgs import DDGS
 
+    searcher = DDGS(timeout=SEARCH_TIMEOUT)
+    bounded = _bounded(max_results)
     try:
-        # The default "auto" backend mixes in engines that reject generic
-        # clients, so the engine is pinned rather than left to chance.
-        results = DDGS(timeout=SEARCH_TIMEOUT).text(
-            query, max_results=_bounded(max_results), backend="duckduckgo"
-        )
-    except Exception as exc:
-        return f"Error: web search failed: {exc}. Retry once, or answer without it."
+        results = searcher.text(query, max_results=bounded, backend="duckduckgo")
+    except Exception as primary_exc:
+        try:
+            results = searcher.text(query, max_results=bounded, backend="google")
+        except Exception as fallback_exc:
+            return (
+                "Error: web search failed after trying DuckDuckGo and Google: "
+                f"{primary_exc}; fallback failed: {fallback_exc}. "
+                "Do not retry the same query; use wikipedia_search or answer with caveats."
+            )
     if not results:
         return f"No web results for {query!r}."
     return "\n\n".join(
@@ -302,6 +418,7 @@ ALL_TOOLS = [
     search_knowledge_base,
     get_current_time,
     python_executor,
+    stock_market_data,
     web_search,
     wikipedia_search,
     wikipedia_summary,
