@@ -360,3 +360,208 @@ A feature is complete only when:
 4. The changed CLI or report path has a smoke test.
 5. Source provenance and timestamps are visible where external data is used.
 6. README or user documentation describes the workflow and limitations.
+
+## 17. Future Feature Roadmap
+
+The following features are proposed follow-on work. They are not part of the
+current implementation unless explicitly moved into a delivery phase.
+
+### 17.1 Provider-aware Indian market data
+
+The market-data layer SHOULD support explicit NSE and BSE selection in addition
+to Yahoo symbol resolution.
+
+Requirements:
+
+- Support canonical NSE and BSE symbols and aliases such as `CEAT.NS`,
+  `CEAT.BO`, `NSE:CEAT`, and `BSE:CEAT`.
+- Preserve exchange, currency, timezone, market-hours, and provider metadata.
+- Prefer exchange-specific providers when configured.
+- Report delayed, unavailable, suspended, and circuit-limit states explicitly.
+- Format prices and quantities using the instrument currency.
+
+Commands:
+
+```text
+/stock CEAT --exchange NSE
+/stock CEAT --exchange BSE
+/market-hours NSE
+/dividends CEAT
+```
+
+Indian market support MUST NOT imply that US-only SEC tools apply to Indian
+issuers. The report MUST identify the applicable regulatory source.
+
+### 17.2 Broker and CSV portfolio import
+
+The portfolio workflow SHOULD import broker exports and a documented generic
+CSV format.
+
+Requirements:
+
+- Support Zerodha, Groww, Interactive Brokers, and generic transaction CSV
+  adapters where fixture formats are available.
+- Validate required columns, symbols, dates, quantities, prices, fees, and
+  transaction sides.
+- Deduplicate imports using a stable transaction fingerprint.
+- Preserve the original import file metadata without storing credentials.
+- Provide a dry-run reconciliation report before mutation.
+
+Commands:
+
+```text
+/portfolio import trades.csv
+/portfolio transactions
+/portfolio reconcile
+/portfolio performance
+```
+
+### 17.3 Corporate-action-aware portfolio accounting
+
+Portfolio accounting SHOULD support splits, bonuses, dividends, rights issues,
+mergers, and symbol changes.
+
+Requirements:
+
+- Adjust quantities and average cost using dated corporate-action records.
+- Keep raw transactions unchanged and record adjustments separately.
+- Distinguish cash dividends from reinvested dividends.
+- Show unrecognized corporate actions as reconciliation warnings.
+- Recalculate historical performance using adjusted and unadjusted views.
+
+### 17.4 Claim-level research citations
+
+Structured research reports SHOULD map findings, risks, catalysts, and scenario
+assumptions to stable source identifiers.
+
+Requirements:
+
+- Each source MUST retain title, URL when available, publisher, publication
+  date when available, retrieval timestamp, and source type.
+- Claims SHOULD reference one or more source IDs.
+- Renderers MUST preserve claim-to-source references consistently in Markdown,
+  JSON, and HTML.
+- Unsupported claims MUST be labeled as synthesis, assumption, or uncertainty.
+
+### 17.5 Earnings intelligence
+
+The research workflow SHOULD provide deeper earnings analysis.
+
+Requirements:
+
+- Retrieve earnings-release and transcript data when a configured provider
+  supports it.
+- Compare reported revenue, EPS, margins, and guidance with prior periods.
+- Separate reported values, company guidance, analyst estimates, and model
+  synthesis.
+- Detect material guidance or estimate revisions.
+- Preserve source provenance for every reported value.
+
+### 17.6 Alert delivery reliability
+
+Alert notification SHOULD support reliable delivery without changing alert
+semantics.
+
+Requirements:
+
+- Add bounded retries with exponential backoff and jitter.
+- Record delivery attempts, response status, and final failure reason.
+- Support notifier health status and a test-notification command.
+- Support quiet hours, per-alert routing, and grouped notifications.
+- Support signed webhooks where the endpoint configuration requires them.
+- Never disable an alert solely because a notifier fails.
+
+### 17.7 Configurable strategy backtests
+
+Historical evaluation SHOULD support user-defined, non-predictive strategy
+rules.
+
+Requirements:
+
+- Support moving-average crossover, RSI, breakout, and buy-and-hold
+  strategies.
+- Keep evaluation time-ordered and prevent look-ahead leakage.
+- Include fees, slippage, benchmark, turnover, drawdown, and equity curve.
+- Label all output historical analysis rather than investment advice.
+- Reject malformed or unsafe strategy expressions.
+
+Example:
+
+```text
+/backtest strategy MSFT sma_crossover 20 50 5y --benchmark SPY
+```
+
+### 17.8 Portfolio risk analysis
+
+Portfolio analytics SHOULD include risk decomposition.
+
+Requirements:
+
+- Calculate beta, sector concentration, symbol concentration, and
+  contribution to portfolio volatility.
+- Provide a historical correlation matrix when sufficient data exists.
+- Provide clearly labeled historical loss estimates such as percentile loss.
+- Mark unavailable or stale inputs per symbol.
+- Never treat missing prices as zero.
+
+Commands:
+
+```text
+/portfolio risk
+/portfolio correlation
+/portfolio concentration
+```
+
+### 17.9 Local web dashboard
+
+The application MAY provide an explicitly local web dashboard for users who
+prefer a browser interface.
+
+Requirements:
+
+- Reuse existing portfolio, watchlist, alert, cache, and report services.
+- Support terminal-equivalent data semantics and provenance.
+- Expose no network listener beyond localhost by default.
+- Require explicit configuration before exposing the dashboard remotely.
+- Avoid storing provider credentials in browser state.
+
+### 17.10 Offline provider replay
+
+The application SHOULD support deterministic recording and replay of provider
+responses.
+
+Requirements:
+
+- Record normalized provider requests and responses with timestamps and
+  provider identifiers.
+- Redact credentials and sensitive portfolio data before writing fixtures.
+- Replay complete research, portfolio, and alert scenarios without network
+  access.
+- Fail clearly when a requested response is not present in the fixture.
+- Keep replay fixtures versioned and compatible with the normalized data
+  contracts.
+
+Commands:
+
+```text
+--record-provider-fixtures fixtures/
+--replay-provider-fixtures fixtures/
+```
+
+### 17.11 Recommended implementation order
+
+The recommended order is:
+
+1. Broker and CSV portfolio import.
+2. Corporate-action-aware accounting.
+3. Provider-aware Indian market data.
+4. Claim-level research citations.
+5. Alert delivery reliability.
+6. Earnings intelligence.
+7. Portfolio risk analysis.
+8. Configurable strategy backtests.
+9. Offline provider replay.
+10. Local web dashboard.
+
+Each roadmap item MUST satisfy the Definition of Done in Section 16 before it
+is considered complete.
