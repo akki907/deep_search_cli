@@ -8,8 +8,10 @@ of them with your own ``@tool`` functions.
 """
 
 import ast
+import math
 import operator
 import re
+import time
 from datetime import UTC, datetime
 from statistics import fmean
 from typing import Any
@@ -162,31 +164,35 @@ def _clip(text: str) -> str:
 STOCK_API_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
 STOCK_PERIODS = frozenset({"1mo", "3mo", "6mo", "1y", "2y", "5y", "max"})
 STOCK_SYMBOL_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9.-]{0,11}")
+STOCK_CACHE_TTL_SECONDS = 60.0
+STOCK_MIN_REQUEST_INTERVAL_SECONDS = 0.1
+_stock_cache: dict[
+    tuple[str, str], tuple[float, dict[str, Any], list[tuple[str, float, int]]]
+] = {}
+_stock_last_request_at = 0.0
 
 
-@tool
-def stock_market_data(symbol: str, period: str = "1y") -> str:
-    """Fetch a bounded quote and daily-price summary for a stock or ETF.
+def _pace_stock_request() -> None:
+    """Keep chart requests from being bursty within one process."""
+    global _stock_last_request_at
+    now = time.monotonic()
+    delay = STOCK_MIN_REQUEST_INTERVAL_SECONDS - (now - _stock_last_request_at)
+    if delay > 0:
+        time.sleep(delay)
+    _stock_last_request_at = time.monotonic()
 
-    This is market data for research and scenario analysis, not a guaranteed
-    forecast or investment recommendation. Use web_search separately for
-    earnings, filings, news, and business fundamentals.
+def _fetch_stock_data(
+    ticker: str, period: str
+) -> tuple[dict[str, Any], list[tuple[str, float, int]], str | None]:
+    """Fetch and normalize Yahoo daily observations for one ticker."""
+    cache_key = (ticker, period)
+    cached = _stock_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < STOCK_CACHE_TTL_SECONDS:
+        return cached[1], cached[2], None
 
-    Args:
-        symbol: Ticker symbol such as ``AAPL`` or ``MSFT``.
-        period: History window: ``1mo``, ``3mo``, ``6mo``, ``1y``, ``2y``,
-            ``5y``, or ``max``.
-
-    """
     import requests
 
-    ticker = symbol.strip().upper()
-    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
-        return f"Error: invalid stock symbol {symbol!r}."
-    if period not in STOCK_PERIODS:
-        allowed = ", ".join(sorted(STOCK_PERIODS))
-        return f"Error: invalid period {period!r}; choose one of: {allowed}."
-
+    _pace_stock_request()
     try:
         response = requests.get(
             f"{STOCK_API_URL}/{ticker}",
@@ -197,11 +203,11 @@ def stock_market_data(symbol: str, period: str = "1y") -> str:
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:
-        return f"Error: stock data unavailable for {ticker}: {exc}"
+        return {}, [], f"Error: stock data unavailable for {ticker}: {exc}"
 
     result = (payload.get("chart", {}).get("result") or [None])[0]
     if not result:
-        return f"Error: no market data returned for {ticker}."
+        return {}, [], f"Error: no market data returned for {ticker}."
 
     meta = result.get("meta") or {}
     timestamps = result.get("timestamp") or []
@@ -219,9 +225,36 @@ def stock_market_data(symbol: str, period: str = "1y") -> str:
             continue
         volume = volumes[index] if index < len(volumes) and volumes[index] else 0
         observations.append((date, price, int(volume)))
-
     if not observations:
-        return f"Error: no usable daily prices returned for {ticker}."
+        return {}, [], f"Error: no usable daily prices returned for {ticker}."
+    _stock_cache[cache_key] = (time.monotonic(), meta, observations)
+    return meta, observations, None
+
+
+@tool
+def stock_market_data(symbol: str, period: str = "1y") -> str:
+    """Fetch a bounded quote and daily-price summary for a stock or ETF.
+
+    This is market data for research and scenario analysis, not a guaranteed
+    forecast or investment recommendation. Use web_search separately for
+    earnings, filings, news, and business fundamentals.
+
+    Args:
+        symbol: Ticker symbol such as ``AAPL`` or ``MSFT``.
+        period: History window: ``1mo``, ``3mo``, ``6mo``, ``1y``, ``2y``,
+            ``5y``, or ``max``.
+
+    """
+    ticker = symbol.strip().upper()
+    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+        return f"Error: invalid stock symbol {symbol!r}."
+    if period not in STOCK_PERIODS:
+        allowed = ", ".join(sorted(STOCK_PERIODS))
+        return f"Error: invalid period {period!r}; choose one of: {allowed}."
+
+    meta, observations, error = _fetch_stock_data(ticker, period)
+    if error:
+        return error
 
     prices = [price for _, price, _ in observations]
     first_price = prices[0]
@@ -262,6 +295,265 @@ def stock_market_data(symbol: str, period: str = "1y") -> str:
     ]
     lines.extend(f"- {date}: {price:.2f}" for date, price, _ in observations[-10:])
     return "\n".join(lines)
+
+def _average(values: list[float]) -> float:
+    return fmean(values) if values else 0.0
+
+
+@tool
+def stock_technicals(symbol: str, period: str = "1y") -> str:
+    """Calculate transparent technical indicators from daily stock prices."""
+    ticker = symbol.strip().upper()
+    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+        return f"Error: invalid stock symbol {symbol!r}."
+    if period not in STOCK_PERIODS:
+        allowed = ", ".join(sorted(STOCK_PERIODS))
+        return f"Error: invalid period {period!r}; choose one of: {allowed}."
+    meta, observations, error = _fetch_stock_data(ticker, period)
+    if error:
+        return error
+
+    prices = [price for _, price, _ in observations]
+    returns = [
+        (prices[index] / prices[index - 1]) - 1
+        for index in range(1, len(prices))
+        if prices[index - 1]
+    ]
+    recent_returns = returns[-20:]
+    gains = [value for value in returns[-14:] if value > 0]
+    losses = [-value for value in returns[-14:] if value < 0]
+    average_gain = _average(gains)
+    average_loss = _average(losses)
+    rsi = 100.0 if average_loss == 0 and average_gain else (
+        100 - (100 / (1 + (average_gain / average_loss)))
+        if average_loss
+        else 50.0
+    )
+    peak = prices[0]
+    max_drawdown = 0.0
+    for price in prices:
+        peak = max(peak, price)
+        max_drawdown = min(max_drawdown, (price / peak) - 1)
+    sma20 = _average(prices[-20:])
+    sma50 = _average(prices[-50:])
+    volatility = math.sqrt(_average([(value - _average(recent_returns)) ** 2 for value in recent_returns]))
+    trend = "bullish" if prices[-1] > sma20 > sma50 else "bearish" if prices[-1] < sma20 < sma50 else "mixed"
+    as_of = meta.get("regularMarketTime") or observations[-1][0]
+    return "\n".join(
+        [
+            f"Symbol: {ticker}",
+            "Data source: Yahoo Finance chart endpoint",
+            f"As of: {as_of}",
+            f"History window: {period}",
+            f"Last close: {prices[-1]:.2f}",
+            f"SMA20: {sma20:.2f}",
+            f"SMA50: {sma50:.2f}",
+            f"RSI14: {rsi:.2f}",
+            f"Annualized 20-day volatility estimate: {volatility * math.sqrt(252) * 100:.2f}%",
+            f"Maximum drawdown in window: {max_drawdown * 100:.2f}%",
+            f"Technical trend classification: {trend}",
+        ]
+    )
+
+
+STOCK_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
+STOCK_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary"
+
+
+def _yahoo_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value.get("raw", value.get("fmt", value.get("longFmt")))
+    return value
+
+
+def _metric(section: dict[str, Any], key: str, percent: bool = False) -> str:
+    value = _yahoo_value(section.get(key))
+    if value is None:
+        return "unavailable"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number * 100:.2f}%" if percent else f"{number:.2f}"
+
+
+@tool
+def resolve_stock_symbol(query: str) -> str:
+    """Resolve a company name or ticker into candidate symbols and exchanges."""
+    import requests
+
+    if not query.strip():
+        return "Error: a company name or ticker is required."
+    try:
+        response = requests.get(
+            STOCK_SEARCH_URL,
+            params={"q": query.strip(), "quotesCount": 5, "newsCount": 0},
+            headers={"User-Agent": USER_AGENT},
+            timeout=SEARCH_TIMEOUT,
+        )
+        response.raise_for_status()
+        quotes = response.json().get("quotes") or []
+    except Exception as exc:
+        return f"Error: stock symbol lookup failed: {exc}"
+    if not quotes:
+        return f"No stock symbols found for {query!r}."
+    lines = [
+        "Data source: Yahoo Finance symbol-search endpoint",
+        *(
+            f"- {quote.get('symbol', 'unknown')}: "
+            f"{quote.get('shortname') or quote.get('longname') or 'unknown'} "
+            f"({quote.get('exchange') or 'unknown'}, {quote.get('quoteType') or 'unknown'})"
+            for quote in quotes
+        ),
+    ]
+    return "\n".join(lines)
+
+
+@tool
+def stock_fundamentals(symbol: str) -> str:
+    """Fetch valuation, profitability, balance-sheet, and company metadata."""
+    import requests
+
+    ticker = symbol.strip().upper()
+    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+        return f"Error: invalid stock symbol {symbol!r}."
+    try:
+        response = requests.get(
+            f"{STOCK_SUMMARY_URL}/{ticker}",
+            params={
+                "modules": ",".join(
+                    [
+                        "price",
+                        "summaryDetail",
+                        "defaultKeyStatistics",
+                        "financialData",
+                        "assetProfile",
+                        "calendarEvents",
+                    ]
+                )
+            },
+            headers={"User-Agent": USER_AGENT},
+            timeout=SEARCH_TIMEOUT,
+        )
+        response.raise_for_status()
+        result = ((response.json().get("quoteSummary") or {}).get("result") or [None])[0]
+    except Exception as exc:
+        return f"Error: fundamentals unavailable for {ticker}: {exc}"
+    if not result:
+        return f"Error: no fundamentals returned for {ticker}."
+
+    price = result.get("price") or {}
+    detail = result.get("summaryDetail") or {}
+    stats = result.get("defaultKeyStatistics") or {}
+    financial = result.get("financialData") or {}
+    profile = result.get("assetProfile") or {}
+    return "\n".join(
+        [
+            f"Symbol: {ticker}",
+            "Data source: Yahoo Finance quote summary",
+            f"Company: {_yahoo_value(price.get('longName')) or _yahoo_value(price.get('shortName')) or 'unavailable'}",
+            f"Sector: {profile.get('sector') or 'unavailable'}",
+            f"Industry: {profile.get('industry') or 'unavailable'}",
+            f"Market cap: {_metric(price, 'marketCap')}",
+            f"Trailing P/E: {_metric(detail, 'trailingPE')}",
+            f"Forward P/E: {_metric(detail, 'forwardPE')}",
+            f"PEG ratio: {_metric(stats, 'pegRatio')}",
+            f"Revenue growth: {_metric(financial, 'revenueGrowth', percent=True)}",
+            f"Profit margin: {_metric(financial, 'profitMargins', percent=True)}",
+            f"Operating margin: {_metric(financial, 'operatingMargins', percent=True)}",
+            f"Return on equity: {_metric(financial, 'returnOnEquity', percent=True)}",
+            f"Debt/equity: {_metric(financial, 'debtToEquity')}",
+            f"Free cash flow: {_metric(financial, 'freeCashflow')}",
+            f"Dividend yield: {_metric(detail, 'dividendYield', percent=True)}",
+        ]
+    )
+
+
+@tool
+def compare_stocks(symbols: str, period: str = "1y") -> str:
+    """Compare up to six stock or ETF symbols using the same market window."""
+    requested = [part.strip().upper() for part in re.split(r"[,\s]+", symbols) if part.strip()]
+    if not requested:
+        return "Error: provide at least one stock symbol."
+    if len(requested) > 6:
+        return "Error: compare_stocks accepts at most six symbols."
+    if period not in STOCK_PERIODS:
+        allowed = ", ".join(sorted(STOCK_PERIODS))
+        return f"Error: invalid period {period!r}; choose one of: {allowed}."
+    rows = [
+        "Data source: Yahoo Finance chart endpoint",
+        "",
+        "Symbol | Last price | Period change | High | Low",
+        "--- | ---: | ---: | ---: | ---:",
+    ]
+    for ticker in requested:
+        if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+            rows.append(f"{ticker} | invalid symbol | - | - | -")
+            continue
+        _meta, observations, error = _fetch_stock_data(ticker, period)
+        if error:
+            rows.append(f"{ticker} | unavailable | - | - | -")
+            continue
+        prices = [price for _, price, _ in observations]
+        change = ((prices[-1] / prices[0]) - 1) * 100 if prices[0] else 0.0
+        rows.append(f"{ticker} | {prices[-1]:.2f} | {change:.2f}% | {max(prices):.2f} | {min(prices):.2f}")
+    return "\n".join(rows)
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * weight
+
+
+@tool
+def stock_backtest(symbol: str, period: str = "5y", horizon_days: int = 60) -> str:
+    """Summarize historical forward-return outcomes for a stock horizon.
+
+    This is historical evaluation, not a predictive model or investment advice.
+    """
+    ticker = symbol.strip().upper()
+    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+        return f"Error: invalid stock symbol {symbol!r}."
+    if period not in STOCK_PERIODS:
+        allowed = ", ".join(sorted(STOCK_PERIODS))
+        return f"Error: invalid period {period!r}; choose one of: {allowed}."
+    if not 1 <= horizon_days <= 756:
+        return "Error: horizon_days must be between 1 and 756."
+
+    _, observations, error = _fetch_stock_data(ticker, period)
+    if error:
+        return error
+    prices = [price for _, price, _ in observations]
+    outcomes = [
+        (prices[index + horizon_days] / prices[index] - 1) * 100
+        for index in range(len(prices) - horizon_days)
+        if prices[index]
+    ]
+    if not outcomes:
+        return (
+            f"Error: {ticker} has fewer than {horizon_days + 1} usable observations "
+            f"for a {horizon_days}-trading-day backtest."
+        )
+    positive = sum(outcome > 0 for outcome in outcomes) / len(outcomes) * 100
+    return "\n".join(
+        [
+            f"Historical backtest: {ticker}",
+            "Data source: Yahoo Finance chart endpoint",
+            f"Window: {period}; horizon: {horizon_days} trading days",
+            f"Observations evaluated: {len(outcomes)}",
+            f"10th percentile forward return: {_percentile(outcomes, 0.10):.2f}%",
+            f"Median forward return: {_percentile(outcomes, 0.50):.2f}%",
+            f"90th percentile forward return: {_percentile(outcomes, 0.90):.2f}%",
+            f"Positive-return frequency: {positive:.2f}%",
+            "Interpretation: historical distribution only; not a forecast or guarantee.",
+        ]
+    )
 
 
 @tool
@@ -419,7 +711,11 @@ ALL_TOOLS = [
     get_current_time,
     python_executor,
     stock_market_data,
-    web_search,
+    stock_technicals,
+    resolve_stock_symbol,
+    stock_fundamentals,
+    compare_stocks,
+    stock_backtest,
     wikipedia_search,
     wikipedia_summary,
     delegate,

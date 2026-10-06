@@ -12,6 +12,7 @@ CLI, the tests, and any other front end.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from react_loop.runner import final_answer
 from react_loop.streaming import StreamEvent
 
 if TYPE_CHECKING:
+    from react_loop.market_state import MarketStateManager
     from react_loop.runner import ReActRunner
     from react_loop.streaming import ReActStreamRunner
 
@@ -39,7 +41,19 @@ COMMANDS: dict[str, str] = {
     "/help": "Show this list of commands",
     "/clear": "Clear the current conversation history",
     "/trace": "Print the full conversation trace",
-    "/research": "Conduct an exhaustive deep research on the provided topic.",
+    "/sources": "List URLs and source references from this conversation",
+    "/research": "Conduct exhaustive deep research on a topic",
+    "/stock": "Research a stock quote, fundamentals, and technicals",
+    "/forecast": "Research bear/base/bull scenarios for a stock and horizon",
+    "/compare": "Compare comma-separated stock symbols",
+    "/backtest": "Evaluate historical forward returns for a symbol and horizon",
+    "/report": "Show the latest answer as a Markdown report",
+    "/watch": "Add a symbol to the watchlist",
+    "/unwatch": "Remove a symbol from the watchlist",
+    "/watchlist": "Show the watchlist",
+    "/portfolio": "Show holdings or set one: /portfolio AAPL 10 150",
+    "/alert": "Add an alert: /alert AAPL below 150",
+    "/alerts": "Show alerts and evaluate current prices",
     "/save": "Save the current session to database",
     "/load": "Load a session by thread ID: /load <id>",
     "/debug": "Toggle interactive debug mode (step-through)",
@@ -108,8 +122,6 @@ class ChatSession:
         self._thread_id = thread_id or uuid.uuid4().hex
     debug_mode: bool = False
 
-    def set_debug(self, enabled: bool):
-        self.debug_mode = enabled
     def set_debug(self, enabled: bool):
         self.debug_mode = enabled
 
@@ -189,6 +201,7 @@ async def run_chat(
     write: Callable[[str], None] = print,
     show_trace: Callable[[list[AnyMessage]], None] | None = None,
     on_error: Callable[[BaseException], None] = print_error,
+    market_state: MarketStateManager | None = None,
 ) -> int:
     """Read questions until ``/exit`` or end of input.
 
@@ -206,7 +219,16 @@ async def run_chat(
         A process exit code, always 0.
 
     """
+    state = market_state
     render_trace = show_trace or partial(print_plain_trace)
+
+    def get_market_state() -> MarketStateManager:
+        nonlocal state
+        if state is None:
+            from react_loop.market_state import MarketStateManager
+
+            state = MarketStateManager()
+        return state
     while True:
         try:
             line = await read_line(PROMPT)
@@ -267,7 +289,106 @@ async def run_chat(
                     f"[RESEARCH MODE]\n{DEEP_RESEARCH_SYSTEM_PROMPT}\n\n"
                     f"Topic: {command.arg}"
                 )
-                # Do NOT continue; let it fall through to the turn() call
+                # Do NOT continue; let it fall through to the turn() call.
+            elif command.name in {"/stock", "/forecast", "/compare", "/backtest"}:
+                if not command.arg:
+                    write(f"Please provide a topic: {command.name} <symbol or question>")
+                    continue
+                text = (
+                    f"[RESEARCH MODE]\n{DEEP_RESEARCH_SYSTEM_PROMPT}\n\n"
+                    f"Topic: {command.arg}"
+                )
+                write(f"Researching: {command.arg}...")
+            elif command.name == "/sources":
+                urls = sorted(
+                    {
+                        match
+                        for message in session.messages()
+                        for match in re.findall(r"https?://[^ )]+", str(message.content))
+                    }
+                )
+                write("\n".join(urls) if urls else "No URLs found in the conversation.")
+                continue
+            elif command.name == "/report":
+                messages = session.messages()
+                write(final_answer(messages) if messages else "No answer is available yet.")
+                continue
+            elif command.name == "/watch":
+                if not command.arg:
+                    write("Usage: /watch <symbol>")
+                    continue
+                try:
+                    ticker = get_market_state().add_watch(command.arg)
+                    write(f"Added {ticker} to the watchlist.")
+                except ValueError as exc:
+                    write(f"Error: {exc}")
+                continue
+            elif command.name == "/unwatch":
+                if not command.arg:
+                    write("Usage: /unwatch <symbol>")
+                    continue
+                try:
+                    ticker = get_market_state().remove_watch(command.arg)
+                    write(f"Removed {ticker} from the watchlist.")
+                except ValueError as exc:
+                    write(f"Error: {exc}")
+                continue
+            elif command.name == "/watchlist":
+                symbols = get_market_state().watchlist()
+                write("Watchlist: " + (", ".join(symbols) if symbols else "(empty)"))
+                continue
+            elif command.name == "/portfolio":
+                parts = command.arg.split()
+                if not parts:
+                    positions = get_market_state().portfolio()
+                    if not positions:
+                        write("Portfolio: (empty)")
+                    else:
+                        write(
+                            "Portfolio: "
+                            + "; ".join(
+                                f"{position['symbol']}: {position['quantity']:g} shares "
+                                f"at {position['cost_basis']:.2f}"
+                                for position in positions
+                            )
+                        )
+                    continue
+                if len(parts) != 3:
+                    write("Usage: /portfolio <symbol> <quantity> <cost_basis>")
+                    continue
+                try:
+                    ticker = get_market_state().set_position(
+                        parts[0], float(parts[1]), float(parts[2])
+                    )
+                    write(f"Saved {ticker} position.")
+                except ValueError as exc:
+                    write(f"Error: {exc}")
+                continue
+            elif command.name == "/alert":
+                parts = command.arg.split()
+                if len(parts) != 3:
+                    write("Usage: /alert <symbol> <above|below> <threshold>")
+                    continue
+                try:
+                    alert_id = get_market_state().add_alert(
+                        parts[0], parts[1].lower(), float(parts[2])
+                    )
+                    write(f"Created alert {alert_id}.")
+                except ValueError as exc:
+                    write(f"Error: {exc}")
+                continue
+            elif command.name == "/alerts":
+                configured = get_market_state().alerts()
+                triggered = get_market_state().evaluate_alerts() if configured else []
+                lines = [
+                    f"{alert['id']}: {alert['symbol']} {alert['operator']} "
+                    f"{alert['threshold']:.2f}"
+                    for alert in configured
+                ]
+                if triggered:
+                    lines.append("Triggered: " + "; ".join(triggered))
+                write("; ".join(lines) if lines else "Alerts: (none)")
+                continue
             else:
                 write(f"Unknown command {command.name}. Type /help for the list.")
                 continue

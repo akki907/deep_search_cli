@@ -14,6 +14,7 @@ from react_loop.graph import (
 )
 from react_loop.llm import ReActModel, ScriptedChatModel, build_llm
 from react_loop.runner import ReActRunner, final_answer, run_react, trace
+from react_loop.market_state import MarketStateManager
 from react_loop.state import AgentState
 from react_loop.streaming import (
     FinalEvent,
@@ -28,6 +29,11 @@ from react_loop.tools import (
     get_current_time,
     search_knowledge_base,
     stock_market_data,
+    stock_technicals,
+    resolve_stock_symbol,
+    stock_fundamentals,
+    compare_stocks,
+    stock_backtest,
     web_search,
     wikipedia_search,
     wikipedia_summary,
@@ -37,6 +43,7 @@ __all__ = [
     "ALL_TOOLS",
     "DEFAULT_SYSTEM_PROMPT",
     "AgentState",
+    "MarketStateManager",
     "ChatSession",
     "Command",
     "FinalEvent",
@@ -62,6 +69,11 @@ __all__ = [
     "setup_logging",
     "should_continue",
     "stock_market_data",
+    "stock_technicals",
+    "resolve_stock_symbol",
+    "stock_fundamentals",
+    "compare_stocks",
+    "stock_backtest",
     "trace",
     "web_search",
     "wikipedia_search",

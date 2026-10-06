@@ -7,6 +7,7 @@ question starts an interactive session that remembers the conversation.
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from langchain_core.messages import AnyMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -28,6 +29,7 @@ from react_loop.console import (
 from react_loop.demo import DEMO_QUESTION, DEMO_SCRIPT
 from react_loop.llm import ReActModel, ScriptedChatModel, build_llm, resolve_target
 from react_loop.research import DEEP_RESEARCH_SYSTEM_PROMPT
+from react_loop.reporting import render_report
 from react_loop.runner import ReActRunner, final_answer
 from react_loop.streaming import ReActStreamRunner
 
@@ -237,6 +239,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run an exhaustive research loop on the topic",
     )
+    parser.add_argument(
+        "--format",
+        dest="report_format",
+        choices=("text", "markdown", "json", "html"),
+        default="text",
+        help="Report output format",
+    )
+    parser.add_argument(
+        "--output",
+        help="Write the report to a file; use '-' for stdout",
+    )
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
         "--rich",
@@ -262,6 +275,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Force interactive mode even if stdin is not a terminal",
     )
     return parser
+
+
+def _emit_report(
+    final_text: str,
+    question: str,
+    args: argparse.Namespace,
+    console: Console,
+    use_rich: bool,
+) -> None:
+    """Print or export the final answer in the requested report format."""
+    rendered = render_report(final_text, question, args.report_format)
+    if args.output:
+        if args.output == "-":
+            print(rendered, end="" if rendered.endswith("\n") else "\n")
+        else:
+            Path(args.output).write_text(rendered, encoding="utf-8")
+            print(f"Report written to {args.output}")
+        return
+    if args.report_format != "text":
+        print(rendered, end="" if rendered.endswith("\n") else "\n")
+        return
+    if use_rich:
+        console.print(f"\n[bold green]Final Answer:[/]\n{final_text}")
+    else:
+        print(f"\nFinal Answer:\n{final_text}")
 
 
 def _run_once(
@@ -290,16 +328,16 @@ def _run_once(
         print()
 
     final_text = messages[-1].content
-    if use_rich:
-        console.print(f"\n[bold green]Final Answer:[/]\n{final_text}")
-    else:
-        print(f"\nFinal Answer:\n{final_text}")
+    _emit_report(final_text, question, args, console, use_rich)
 
     return 0
 
 def main(argv: list[str] | None = None) -> int:
     """Answer one question, or run an interactive session."""
     args = _build_parser().parse_args(argv)
+    if args.stream and (args.output or args.report_format != "text"):
+        print("error: --stream cannot be combined with report export options.", file=sys.stderr)
+        return 2
 
     # Colour only when writing to a terminal, so redirected output stays plain.
     use_rich = sys.stdout.isatty() if args.rich is None else args.rich
@@ -384,10 +422,7 @@ def main(argv: list[str] | None = None) -> int:
             print()
 
         final_text = final_answer(messages)
-        if use_rich:
-            console.print(f"\n[bold green]Final Answer:[/]\n{final_text}")
-        else:
-            print(f"\nFinal Answer:\n{final_text}")
+        _emit_report(final_text, question, args, console, use_rich)
         return 0
 
     return _run_once(llm, question, args, console, use_rich)

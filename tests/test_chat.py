@@ -9,6 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from react_loop.chat import COMMANDS, ChatSession, parse_command, run_chat
 from react_loop.llm import ScriptedChatModel
+from react_loop.market_state import MarketStateManager
 from react_loop.runner import ReActRunner
 
 #: What record() hands back: what the session wrote, what /trace showed, exit code.
@@ -40,7 +41,7 @@ def feed(lines: list[str]):
     return read_line
 
 
-def record(session: ChatSession, lines: list[str], turn=None) -> SessionLog:
+def record(session: ChatSession, lines: list[str], turn=None, state=None) -> SessionLog:
     """Drive one session, returning what it wrote, /trace showed, and the code."""
     written: list[str] = []
     traced: list[list[AnyMessage]] = []
@@ -56,6 +57,7 @@ def record(session: ChatSession, lines: list[str], turn=None) -> SessionLog:
             write=written.append,
             show_trace=lambda messages: traced.append(messages),
             on_error=lambda exc: written.append(f"error: {exc}"),
+            market_state=state,
         )
     )
     return written, traced, code
@@ -230,3 +232,71 @@ def test_research_command_marks_turn_as_deep_research():
         "Topic: Compare SQLite and PostgreSQL."
     ]
     assert written == ["🔍 Deep researching: Compare SQLite and PostgreSQL...."]
+
+
+def test_market_commands_update_persistent_state(tmp_path):
+    state = MarketStateManager(str(tmp_path / "market.db"))
+
+    written, _, code = record(
+        make_session(),
+        ["/watch AAPL", "/portfolio MSFT 2 300", "/alert AAPL below 150", "/watchlist", "/exit"],
+        state=state,
+    )
+
+    assert code == 0
+    assert state.watchlist() == ["AAPL"]
+    assert state.portfolio()[0]["symbol"] == "MSFT"
+    assert state.alerts()[0]["operator"] == "below"
+    assert "Watchlist: AAPL" in written
+
+
+def test_stock_research_commands_dispatch_to_deep_prompt():
+    asked: list[str] = []
+
+    async def capture(_session: ChatSession, question: str) -> None:
+        asked.append(question)
+
+    written, _, code = record(
+        make_session(),
+        ["/stock MSFT", "/forecast MSFT 12 months", "/compare MSFT AAPL", "/backtest MSFT 60", "/exit"],
+        turn=capture,
+    )
+
+    assert code == 0
+    assert [question.split("Topic: ", 1)[1] for question in asked] == [
+        "MSFT",
+        "MSFT 12 months",
+        "MSFT AAPL",
+        "MSFT 60",
+    ]
+    assert written == [
+        "Researching: MSFT...",
+        "Researching: MSFT 12 months...",
+        "Researching: MSFT AAPL...",
+        "Researching: MSFT 60...",
+    ]
+
+
+def test_sources_report_and_empty_alert_commands(tmp_path):
+    class StaticSession:
+        def messages(self):
+            return [
+                HumanMessage(content="Research https://example.test/source"),
+                AIMessage(content="# Sources\n1. Example https://example.test/source"),
+            ]
+
+    written: list[str] = []
+
+    async def run():
+        return await run_chat(
+            StaticSession(),
+            read_line=feed(["/sources", "/report", "/alerts", "/exit"]),
+            turn=lambda *_args: None,
+            write=written.append,
+            market_state=MarketStateManager(str(tmp_path / "market.db")),
+        )
+
+    assert asyncio.run(run()) == 0
+    assert "https://example.test/source" in written
+    assert written[1].startswith("# Sources")
+    assert written[2] == "Alerts: (none)"

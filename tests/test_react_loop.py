@@ -509,6 +509,8 @@ def test_cli_deep_research_uses_research_prompt_and_requested_budget(monkeypatch
     assert calls["recursion_limit"] == 7
     assert calls["verbose"] is False
     assert "stock_market_data" in calls["system_prompt"]
+    assert "stock_backtest" in calls["system_prompt"]
+    assert "Catalysts and risk timeline" in calls["system_prompt"]
     assert "bear/base/bull" in calls["system_prompt"]
     output = capsys.readouterr().out
     assert "A structured research report." in output

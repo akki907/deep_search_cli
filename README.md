@@ -113,6 +113,55 @@ certainty or provide personalized buy, sell, or hold instructions. Market data
 can be delayed, unavailable, or incorrect; verify important figures against
 official filings and investor-relations sources before making decisions.
 
+The stock tool set also includes:
+
+- `resolve_stock_symbol` for ticker/exchange lookup;
+- `stock_fundamentals` for valuation, profitability, leverage, cash flow, and
+  company metadata;
+- `stock_technicals` for moving averages, RSI, volatility, and drawdown;
+- `compare_stocks` for peer tables;
+- `stock_backtest` for historical forward-return distributions at a selected
+  trading-day horizon.
+
+Yahoo chart observations are cached in memory for 60 seconds and chart
+requests are paced within each process to avoid repeated or bursty requests.
+Tool output identifies the data source; web-search results retain returned
+titles and URLs for report provenance. Historical backtests describe past
+distributions only and are not predictive forecasts.
+
+Use `--format` and `--output` to export one-shot reports:
+
+```bash
+uv run python -m react_loop --deep-research --no-trace \
+  --format json --output report.json "Research MSFT and its peers."
+uv run python -m react_loop --deep-research --no-trace \
+  --format html --output report.html "Research MSFT and its peers."
+```
+
+Supported formats are `text`, `markdown`, `json`, and `html`. JSON includes
+the question, generation timestamp, full answer, and extracted source entries.
+HTML is standalone and safe to open without the application.
+
+Interactive sessions provide market controls:
+
+```text
+/stock MSFT
+/forecast MSFT 12 months
+/compare MSFT AAPL GOOGL
+/backtest MSFT 60 trading days
+/watch MSFT
+/watchlist
+/portfolio MSFT 10 300
+/alert MSFT below 250
+/alerts
+/sources
+/report
+```
+
+Watchlists, positions, and alerts are stored in `market_state.db`. Alerts are
+evaluated when `/alerts` is requested; this is not a background notification
+service. Session history remains in `sessions.db`.
+
 ### With OpenRouter
 
 Put your settings in a `.env` file in the project root. It is gitignored, and
