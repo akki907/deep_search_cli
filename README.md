@@ -123,6 +123,11 @@ The stock tool set also includes:
 - `stock_backtest` for historical forward-return distributions at a selected
   trading-day horizon.
 
+Bare Indian symbols are resolved through Yahoo Finance when needed. NSE and
+BSE aliases are supported as `CEAT`, `CEAT.NS`, `NSE:CEAT`, `CEAT.BO`, and
+`BSE:CEAT`; Yahoo may return the issuer's canonical symbol such as
+`CEATLTD.NS`.
+
 Yahoo chart observations are cached in memory for 60 seconds and chart
 requests are paced within each process to avoid repeated or bursty requests.
 Tool output identifies the data source; web-search results retain returned
@@ -161,6 +166,80 @@ Interactive sessions provide market controls:
 Watchlists, positions, and alerts are stored in `market_state.db`. Alerts are
 evaluated when `/alerts` is requested; this is not a background notification
 service. Session history remains in `sessions.db`.
+
+### Next market-data and portfolio features
+
+The next feature set adds a persistent normalized data layer:
+
+- `MarketDataProvider` defines quote, history, fundamentals, and event APIs;
+- `YahooFinanceProvider` is the default provider;
+- `FallbackMarketDataProvider` supports ordered provider fallback and detects
+  materially conflicting quotes;
+- `MarketDataCache` persists normalized results in `market_data_cache.db`;
+- stale cached data is returned with an explicit stale flag when providers are
+  unavailable.
+
+SEC and earnings tools:
+
+```text
+sec_filings MSFT 10-K 3
+earnings_history MSFT
+earnings_calendar MSFT
+market_calendar MSFT
+```
+
+The interactive session also supports:
+
+```text
+/cache
+/cache clear
+/refresh MSFT
+/portfolio summary
+/portfolio performance
+/portfolio allocation
+/portfolio export portfolio.json
+/watchlist dashboard
+/watchlist refresh
+/watchlist export watchlist.csv
+/calendar MSFT
+/calendar watchlist
+/calendar next 30d
+/alert MSFT price below 250
+/alert AAPL change below -5%
+/alert disable 3
+/alert delete 3
+/alerts history
+```
+
+Portfolio values include quote freshness, unavailable-price handling, market
+value, gain/loss, allocation, historical volatility, and drawdown when enough
+history is available. Portfolio transactions use average-cost accounting.
+
+Run the explicit background alert scheduler with:
+
+```bash
+uv run python -m react_loop --monitor-alerts --alert-interval 60
+uv run python -m react_loop --monitor-alerts \
+  --alert-webhook https://example.test/webhook
+```
+
+Alerts persist in `market_state.db`, honor cooldowns, and record trigger and
+notification-error history. The scheduler is opt-in; the application does not
+start an unattended background process automatically.
+
+Forecast evaluation now supports time-ordered forward-return analysis with
+benchmarks, transaction costs, slippage, maximum adverse/favorable excursion,
+low-sample warnings, and probability calibration:
+
+```text
+stock_backtest MSFT 5y 60 SPY 5 10
+evaluate_forecast_probabilities {"predictions":[{"probability":0.7,"outcome":1}]}
+```
+
+Structured JSON reports include symbols, findings, catalysts, scenarios,
+caveats, source entries, and the original answer. External data remains
+subject to provider availability, freshness, rate limits, and source
+limitations.
 
 ### With OpenRouter
 

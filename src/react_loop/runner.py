@@ -5,6 +5,7 @@ from collections.abc import Sequence, Callable, AsyncIterator
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphRecursionError
 
 from react_loop.graph import build_react_graph
 from react_loop.llm import ReActModel, build_llm
@@ -71,7 +72,18 @@ class ReActRunner:
 
         start = {"messages": [HumanMessage(content=question)]}
         self.logger.info(f"Session {self.session_id}: User question: {question}")
-        state = self.graph.invoke(start, config)
+        invocations = 0
+
+        def invoke(input_state: dict[str, Any] | None) -> dict[str, Any]:
+            nonlocal invocations
+            if invocations >= recursion_limit:
+                raise GraphRecursionError(
+                    f"Recursion limit of {recursion_limit} reached"
+                )
+            invocations += 1
+            return self.graph.invoke(input_state, config)
+
+        state = invoke(start)
 
         while True:
             snapshot = self.graph.get_state(config)
@@ -103,7 +115,7 @@ class ReActRunner:
                     if tool_calls:
                         self.graph.update_state(config, {"messages": [ToolMessage(tool_call_id=tool_calls[0]["id"], content="Cancelled")]})
 
-            state = self.graph.invoke(None, config)
+            state = invoke(None)
 
         return state
 

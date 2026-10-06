@@ -8,6 +8,7 @@ of them with your own ``@tool`` functions.
 """
 
 import ast
+import json
 import math
 import operator
 import re
@@ -190,26 +191,30 @@ def _fetch_stock_data(
     if cached and time.monotonic() - cached[0] < STOCK_CACHE_TTL_SECONDS:
         return cached[1], cached[2], None
 
-    import requests
-
-    _pace_stock_request()
+    requested_ticker = ticker
     try:
-        response = requests.get(
-            f"{STOCK_API_URL}/{ticker}",
-            params={"range": period, "interval": "1d", "events": "history"},
-            headers={"User-Agent": USER_AGENT},
-            timeout=SEARCH_TIMEOUT,
-        )
-        response.raise_for_status()
-        payload = response.json()
+        payload = _request_stock_payload(ticker, period)
     except Exception as exc:
-        return {}, [], f"Error: stock data unavailable for {ticker}: {exc}"
+        resolved = _resolve_yahoo_ticker(ticker)
+        if not resolved:
+            return {}, [], f"Error: stock data unavailable for {requested_ticker}: {exc}"
+        try:
+            payload = _request_stock_payload(resolved, period)
+        except Exception as resolved_exc:
+            return (
+                {},
+                [],
+                f"Error: stock data unavailable for {requested_ticker} "
+                f"(tried {resolved}): {resolved_exc}",
+            )
+        ticker = resolved
 
     result = (payload.get("chart", {}).get("result") or [None])[0]
     if not result:
         return {}, [], f"Error: no market data returned for {ticker}."
 
     meta = result.get("meta") or {}
+    meta.setdefault("symbol", ticker)
     timestamps = result.get("timestamp") or []
     quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
     closes = quote.get("close") or []
@@ -227,7 +232,10 @@ def _fetch_stock_data(
         observations.append((date, price, int(volume)))
     if not observations:
         return {}, [], f"Error: no usable daily prices returned for {ticker}."
-    _stock_cache[cache_key] = (time.monotonic(), meta, observations)
+    cached_value = (time.monotonic(), meta, observations)
+    _stock_cache[cache_key] = cached_value
+    if ticker != requested_ticker:
+        _stock_cache[(ticker, period)] = cached_value
     return meta, observations, None
 
 
@@ -245,7 +253,7 @@ def stock_market_data(symbol: str, period: str = "1y") -> str:
             ``5y``, or ``max``.
 
     """
-    ticker = symbol.strip().upper()
+    ticker = _normalize_market_ticker(symbol)
     if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
         return f"Error: invalid stock symbol {symbol!r}."
     if period not in STOCK_PERIODS:
@@ -255,7 +263,7 @@ def stock_market_data(symbol: str, period: str = "1y") -> str:
     meta, observations, error = _fetch_stock_data(ticker, period)
     if error:
         return error
-
+    display_ticker = str(meta.get("symbol") or ticker)
     prices = [price for _, price, _ in observations]
     first_price = prices[0]
     last_price = prices[-1]
@@ -278,7 +286,7 @@ def stock_market_data(symbol: str, period: str = "1y") -> str:
     )
 
     lines = [
-        f"Symbol: {ticker}",
+        f"Symbol: {display_ticker}",
         "Data source: Yahoo Finance chart endpoint",
         f"Exchange: {meta.get('exchangeName') or 'unavailable'}",
         f"Currency: {meta.get('currency') or 'unavailable'}",
@@ -303,7 +311,7 @@ def _average(values: list[float]) -> float:
 @tool
 def stock_technicals(symbol: str, period: str = "1y") -> str:
     """Calculate transparent technical indicators from daily stock prices."""
-    ticker = symbol.strip().upper()
+    ticker = _normalize_market_ticker(symbol)
     if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
         return f"Error: invalid stock symbol {symbol!r}."
     if period not in STOCK_PERIODS:
@@ -358,6 +366,89 @@ def stock_technicals(symbol: str, period: str = "1y") -> str:
 
 STOCK_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
 STOCK_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary"
+def _normalize_market_ticker(symbol: str) -> str:
+    """Normalize Yahoo exchange aliases such as ``NSE:CEAT`` and ``CEAT.BSE``."""
+    ticker = symbol.strip().upper()
+    if ":" in ticker:
+        exchange, ticker = ticker.split(":", 1)
+        suffix = {"NSE": ".NS", "BSE": ".BO"}.get(exchange)
+        if suffix:
+            return f"{ticker}{suffix}"
+    if ticker.endswith(".NSE"):
+        return f"{ticker[:-4]}.NS"
+    if ticker.endswith(".BSE"):
+        return f"{ticker[:-4]}.BO"
+    return ticker
+
+
+
+
+def _request_stock_payload(ticker: str, period: str) -> dict[str, Any]:
+    """Request one Yahoo chart payload with the shared timeout and pacing."""
+    import requests
+
+    _pace_stock_request()
+    response = requests.get(
+        f"{STOCK_API_URL}/{ticker}",
+        params={"range": period, "interval": "1d", "events": "history"},
+        headers={"User-Agent": USER_AGENT},
+        timeout=SEARCH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _resolve_yahoo_ticker(ticker: str) -> str | None:
+    """Resolve a Yahoo ticker after its direct chart request fails."""
+    search_term = ticker
+    requested_suffix: str | None = None
+    if "." in ticker:
+        base, suffix = ticker.rsplit(".", 1)
+        if suffix not in {"NS", "BO"}:
+            return None
+        search_term = base
+        requested_suffix = f".{suffix}"
+    import requests
+
+    try:
+        _pace_stock_request()
+        response = requests.get(
+            STOCK_SEARCH_URL,
+            params={"q": search_term, "quotesCount": 10, "newsCount": 0},
+            headers={"User-Agent": USER_AGENT},
+            timeout=SEARCH_TIMEOUT,
+        )
+        response.raise_for_status()
+        quotes = response.json().get("quotes") or []
+    except Exception:
+        return None
+
+    exact = next(
+        (
+            str(quote["symbol"]).upper()
+            for quote in quotes
+            if str(quote.get("symbol", "")).upper() == ticker
+        ),
+        None,
+    )
+    if exact:
+        return exact
+
+    indian = [
+        str(quote["symbol"]).upper()
+        for quote in quotes
+        if str(quote.get("exchange", "")).upper() in {"NSI", "NSE", "BSE", "BOM"}
+        and str(quote.get("symbol", "")).upper().endswith((".NS", ".BO"))
+    ]
+    if requested_suffix:
+        indian = [symbol for symbol in indian if symbol.endswith(requested_suffix)]
+    matching_indian = next(
+        (symbol for symbol in indian if symbol.split(".", 1)[0].startswith(search_term)),
+        None,
+    )
+    if matching_indian:
+        return matching_indian
+    return next((symbol for symbol in indian if symbol.startswith(f"{search_term}.")), None)
 
 
 def _yahoo_value(value: Any) -> Any:
@@ -472,7 +563,11 @@ def stock_fundamentals(symbol: str) -> str:
 @tool
 def compare_stocks(symbols: str, period: str = "1y") -> str:
     """Compare up to six stock or ETF symbols using the same market window."""
-    requested = [part.strip().upper() for part in re.split(r"[,\s]+", symbols) if part.strip()]
+    requested = [
+        _normalize_market_ticker(part)
+        for part in re.split(r"[,\s]+", symbols)
+        if part.strip()
+    ]
     if not requested:
         return "Error: provide at least one stock symbol."
     if len(requested) > 6:
@@ -512,12 +607,16 @@ def _percentile(values: list[float], fraction: float) -> float:
 
 
 @tool
-def stock_backtest(symbol: str, period: str = "5y", horizon_days: int = 60) -> str:
-    """Summarize historical forward-return outcomes for a stock horizon.
-
-    This is historical evaluation, not a predictive model or investment advice.
-    """
-    ticker = symbol.strip().upper()
+def stock_backtest(
+    symbol: str,
+    period: str = "5y",
+    horizon_days: int = 60,
+    benchmark_symbol: str = "",
+    transaction_cost_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+) -> str:
+    """Run a time-ordered historical forward-return evaluation."""
+    ticker = _normalize_market_ticker(symbol)
     if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
         return f"Error: invalid stock symbol {symbol!r}."
     if period not in STOCK_PERIODS:
@@ -525,35 +624,281 @@ def stock_backtest(symbol: str, period: str = "5y", horizon_days: int = 60) -> s
         return f"Error: invalid period {period!r}; choose one of: {allowed}."
     if not 1 <= horizon_days <= 756:
         return "Error: horizon_days must be between 1 and 756."
+    if transaction_cost_bps < 0 or slippage_bps < 0:
+        return "Error: transaction_cost_bps and slippage_bps must be non-negative."
 
     _, observations, error = _fetch_stock_data(ticker, period)
     if error:
         return error
     prices = [price for _, price, _ in observations]
-    outcomes = [
-        (prices[index + horizon_days] / prices[index] - 1) * 100
-        for index in range(len(prices) - horizon_days)
-        if prices[index]
-    ]
+    outcomes: list[float] = []
+    adverse: list[float] = []
+    favorable: list[float] = []
+    for index in range(len(prices) - horizon_days):
+        start = prices[index]
+        if not start:
+            continue
+        path = [price / start - 1 for price in prices[index + 1 : index + horizon_days + 1]]
+        outcomes.append(path[-1] * 100)
+        adverse.append(min(path) * 100)
+        favorable.append(max(path) * 100)
     if not outcomes:
         return (
             f"Error: {ticker} has fewer than {horizon_days + 1} usable observations "
             f"for a {horizon_days}-trading-day backtest."
         )
-    positive = sum(outcome > 0 for outcome in outcomes) / len(outcomes) * 100
-    return "\n".join(
-        [
-            f"Historical backtest: {ticker}",
-            "Data source: Yahoo Finance chart endpoint",
-            f"Window: {period}; horizon: {horizon_days} trading days",
-            f"Observations evaluated: {len(outcomes)}",
-            f"10th percentile forward return: {_percentile(outcomes, 0.10):.2f}%",
-            f"Median forward return: {_percentile(outcomes, 0.50):.2f}%",
-            f"90th percentile forward return: {_percentile(outcomes, 0.90):.2f}%",
-            f"Positive-return frequency: {positive:.2f}%",
-            "Interpretation: historical distribution only; not a forecast or guarantee.",
+
+    round_trip_cost = 2 * (transaction_cost_bps + slippage_bps) / 100
+    net_outcomes = [value - round_trip_cost for value in outcomes]
+    positive = sum(outcome > 0 for outcome in net_outcomes) / len(net_outcomes) * 100
+    lines = [
+        f"Historical backtest: {ticker}",
+        "Data source: Yahoo Finance chart endpoint",
+        "Evaluation: time-ordered walk-forward forward returns",
+        f"Window: {period}; horizon: {horizon_days} trading days",
+        f"Observations evaluated: {len(net_outcomes)}",
+        f"Transaction cost: {transaction_cost_bps:.2f} bps per side",
+        f"Slippage: {slippage_bps:.2f} bps per side",
+        f"10th percentile net return: {_percentile(net_outcomes, 0.10):.2f}%",
+        f"Median net return: {_percentile(net_outcomes, 0.50):.2f}%",
+        f"90th percentile net return: {_percentile(net_outcomes, 0.90):.2f}%",
+        f"Positive-return frequency: {positive:.2f}%",
+        f"Positive-return frequency after costs: {positive:.2f}%",
+        f"Maximum adverse excursion: {_percentile(adverse, 0.50):.2f}%",
+        f"Maximum favorable excursion: {_percentile(favorable, 0.50):.2f}%",
+    ]
+    if len(net_outcomes) < 30:
+        lines.append("Warning: low sample size; results are unstable and descriptive only.")
+
+    benchmark = _normalize_market_ticker(benchmark_symbol)
+    if benchmark:
+        if not STOCK_SYMBOL_PATTERN.fullmatch(benchmark):
+            lines.append(f"Benchmark warning: invalid symbol {benchmark_symbol!r}.")
+        else:
+            _, benchmark_observations, benchmark_error = _fetch_stock_data(benchmark, period)
+            benchmark_prices = [price for _, price, _ in benchmark_observations]
+            if benchmark_error or len(benchmark_prices) <= horizon_days:
+                lines.append(f"Benchmark warning: unavailable for {benchmark}.")
+            else:
+                benchmark_returns = [
+                    benchmark_prices[index + horizon_days] / benchmark_prices[index] - 1
+                    for index in range(len(benchmark_prices) - horizon_days)
+                    if benchmark_prices[index]
+                ]
+                lines.append(
+                    f"Benchmark {benchmark} median return: "
+                    f"{_percentile([value * 100 for value in benchmark_returns], 0.50):.2f}%"
+                )
+    lines.append("Interpretation: historical distribution only; not a forecast or guarantee.")
+    return "\n".join(lines)
+ 
+
+
+@tool
+def evaluate_forecast_probabilities(forecasts_json: str, bin_count: int = 5) -> str:
+    """Calculate Brier score and calibration bins for binary forecasts."""
+    try:
+        payload = json.loads(forecasts_json)
+        rows = payload.get("predictions", payload) if isinstance(payload, dict) else payload
+        from react_loop.forecast_eval import ForecastObservation, brier_score, calibration_bins
+
+        observations = [
+            ForecastObservation(float(row["probability"]), int(row["outcome"]))
+            for row in rows
         ]
+        if any(item.outcome not in {0, 1} or not 0 <= item.probability <= 1 for item in observations):
+            raise ValueError("probability must be 0..1 and outcome must be 0 or 1")
+        score = brier_score(observations)
+        bins = calibration_bins(observations, bin_count)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return f"Error: invalid forecast observations: {exc}"
+    return json.dumps(
+        {
+            "brier_score": score,
+            "sample_size": len(observations),
+            "calibration_bins": bins,
+        },
+        indent=2,
     )
+
+
+@tool
+def sec_filings(symbol: str, filing_type: str = "10-K", limit: int = 5) -> str:
+    """Return recent SEC filings with accession numbers and source URLs."""
+    ticker = symbol.strip().upper()
+    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+        return f"Error: invalid stock symbol {symbol!r}."
+    try:
+        from react_loop.sec_data import sec_filings_data
+
+        filings = sec_filings_data(ticker, filing_type, limit)
+    except Exception as exc:
+        return f"Error: SEC filings unavailable for {ticker}: {exc}"
+    if not filings:
+        return f"No {filing_type.upper()} filings found for {ticker}."
+    lines = [f"SEC filings for {ticker}", "Source: SEC EDGAR"]
+    for filing in filings:
+        lines.extend(
+            [
+                f"- {filing['form']} filed {filing['filing_date']} "
+                f"(report date {filing['report_date'] or 'unavailable'})",
+                f"  Accession: {filing['accession_number']}",
+                f"  Company: {filing['company']}",
+                f"  URL: {filing['url']}",
+                f"  Retrieved: {filing['retrieved_at']}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+@tool
+def earnings_history(symbol: str) -> str:
+    """Return reported versus estimated EPS history for a symbol."""
+    ticker = symbol.strip().upper()
+    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+        return f"Error: invalid stock symbol {symbol!r}."
+    try:
+        from react_loop.sec_data import earnings_history_data
+
+        rows = earnings_history_data(ticker)
+    except Exception as exc:
+        return f"Error: earnings history unavailable for {ticker}: {exc}"
+    if not rows:
+        return f"No earnings history returned for {ticker}."
+    lines = [
+        f"Earnings history: {ticker}",
+        "Source: Yahoo Finance earnings history endpoint",
+        "Quarter | Actual EPS | Estimate EPS | Surprise | Surprise %",
+        "--- | ---: | ---: | ---: | ---:",
+    ]
+    for row in rows:
+        lines.append(
+            f"{row['quarter'] or 'unavailable'} | {row['actual_eps']!s} | "
+            f"{row['estimate_eps']!s} | {row['surprise']!s} | "
+            f"{row['surprise_percent']!s}"
+        )
+    lines.append(f"Source URL: {rows[0]['source_url']}")
+    return "\n".join(lines)
+
+
+@tool
+def earnings_calendar(symbol: str) -> str:
+    """Return upcoming provider-supplied earnings dates."""
+    ticker = symbol.strip().upper()
+    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+        return f"Error: invalid stock symbol {symbol!r}."
+    try:
+        from react_loop.sec_data import earnings_calendar_data
+
+        events = earnings_calendar_data(ticker)
+    except Exception as exc:
+        return f"Error: earnings calendar unavailable for {ticker}: {exc}"
+    if not events:
+        return f"No upcoming earnings dates returned for {ticker}."
+    lines = [f"Earnings calendar: {ticker}", "Date | Status | Confidence", "--- | --- | ---"]
+    lines.extend(
+        f"{event['expected_date'] or 'unknown'} | {event['status']} | {event['confidence']}"
+        for event in events
+    )
+    lines.append(f"Source URL: {events[0]['source_url']}")
+    return "\n".join(lines)
+
+
+@tool
+def market_calendar(
+    symbol: str,
+    filing_limit: int = 5,
+    days: int = 365,
+    future_only: bool = False,
+) -> str:
+    """Combine upcoming earnings and recent SEC catalyst events."""
+    ticker = symbol.strip().upper()
+    if days < 1:
+        return "Error: days must be positive."
+    if not STOCK_SYMBOL_PATTERN.fullmatch(ticker):
+        return f"Error: invalid stock symbol {symbol!r}."
+    from react_loop.sec_data import earnings_calendar_data, sec_filings_data
+
+    events: list[dict[str, Any]] = []
+    errors: list[str] = []
+    try:
+        events.extend(earnings_calendar_data(ticker))
+    except Exception as exc:
+        errors.append(f"earnings: {exc}")
+    for form in ("8-K", "10-Q"):
+        try:
+            filings = sec_filings_data(ticker, form, filing_limit)
+        except Exception as exc:
+            errors.append(f"{form}: {exc}")
+            continue
+        events.extend(
+            {
+                "expected_date": filing["filing_date"],
+                "event_type": filing["form"],
+                "status": "confirmed",
+                "confidence": "SEC filing",
+                "title": f"{filing['company']} {filing['form']}",
+                "source_url": filing["url"],
+            }
+            for filing in filings
+        )
+    events.sort(key=lambda event: event["expected_date"] or "9999-99-99")
+    if future_only:
+        today = datetime.now(UTC).date()
+        cutoff = today.fromordinal(today.toordinal() + days)
+        filtered: list[dict[str, Any]] = []
+        for event in events:
+            try:
+                event_date = datetime.fromisoformat(event["expected_date"]).date()
+            except (TypeError, ValueError):
+                continue
+            if today <= event_date <= cutoff:
+                filtered.append(event)
+        events = filtered
+    if not events and errors:
+        return f"Error: catalyst calendar unavailable for {ticker}: {'; '.join(errors)}"
+    lines = [
+        f"Catalyst calendar: {ticker}",
+        "Date | Event | Status | Confidence | Source",
+        "--- | --- | --- | --- | ---",
+    ]
+    lines.extend(
+        f"{event['expected_date'] or 'unknown'} | {event['title']} | "
+        f"{event['status']} | {event['confidence']} | {event.get('source_url', '')}"
+        for event in events
+    )
+    if errors:
+        lines.append(f"Warnings: {'; '.join(errors)}")
+    return "\n".join(lines)
+
+
+@tool
+def market_cache_status(symbol: str = "") -> str:
+    """Show persistent market-cache entries and freshness metadata."""
+    from react_loop.market_data import MarketDataCache
+
+    entries = MarketDataCache().entries(symbol.strip().upper() or None)
+    if not entries:
+        return "Market cache is empty."
+    lines = ["Cache key | Symbol | Type | Period | Provider | Fetched | Fresh | Data date"]
+    lines.append("--- | --- | --- | --- | --- | --- | --- | ---")
+    lines.extend(
+        f"{entry['cache_key']} | {entry['symbol']} | {entry['data_type']} | "
+        f"{entry['period']} | {entry['provider']} | {entry['fetched_at']} | "
+        f"{'yes' if entry['fresh'] else 'stale'} | {entry['data_at'] or 'unknown'}"
+        for entry in entries
+    )
+    return "\n".join(lines)
+
+
+@tool
+def clear_market_cache(symbol: str = "") -> str:
+    """Clear all persistent market-cache entries or one symbol's entries."""
+    from react_loop.market_data import MarketDataCache
+
+    ticker = symbol.strip().upper() or None
+    removed = MarketDataCache().clear(ticker)
+    return f"Cleared {removed} market-cache entr{'y' if removed == 1 else 'ies'}."
 
 
 @tool
@@ -716,6 +1061,13 @@ ALL_TOOLS = [
     stock_fundamentals,
     compare_stocks,
     stock_backtest,
+    evaluate_forecast_probabilities,
+    sec_filings,
+    earnings_history,
+    earnings_calendar,
+    market_calendar,
+    market_cache_status,
+    clear_market_cache,
     wikipedia_search,
     wikipedia_summary,
     delegate,

@@ -12,9 +12,11 @@ CLI, the tests, and any other front end.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -54,6 +56,9 @@ COMMANDS: dict[str, str] = {
     "/portfolio": "Show holdings or set one: /portfolio AAPL 10 150",
     "/alert": "Add an alert: /alert AAPL below 150",
     "/alerts": "Show alerts and evaluate current prices",
+    "/cache": "Show or clear persistent market-data cache",
+    "/refresh": "Refresh market data: /refresh MSFT",
+    "/calendar": "Show earnings and catalyst events",
     "/save": "Save the current session to database",
     "/load": "Load a session by thread ID: /load <id>",
     "/debug": "Toggle interactive debug mode (step-through)",
@@ -158,10 +163,23 @@ class ChatSession:
         )
 
     def ask(self, question: str) -> str:
-        """Run one turn to completion and return the final answer."""
-        result = self.runner.run(
-            question, recursion_limit=self.recursion_limit, thread_id=self._thread_id
-        )
+        """Run one turn to completion and return the final answer.
+
+        A synchronous caller may invoke this method from an async test or
+        application callback. In that case the runner's sync bridge runs in
+        a worker thread because ``asyncio.run`` cannot nest in the active loop.
+        """
+        kwargs = {
+            "recursion_limit": self.recursion_limit,
+            "thread_id": self._thread_id,
+        }
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            result = self.runner.run(question, **kwargs)
+        else:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                result = executor.submit(self.runner.run, question, **kwargs).result()
         return final_answer(result["messages"])
 
     async def aask(
@@ -229,6 +247,15 @@ async def run_chat(
 
             state = MarketStateManager()
         return state
+    market_service = None
+
+    def get_market_service():
+        nonlocal market_service
+        if market_service is None:
+            from react_loop.market_data import CachedMarketDataService
+
+            market_service = CachedMarketDataService()
+        return market_service
     while True:
         try:
             line = await read_line(PROMPT)
@@ -254,6 +281,62 @@ async def run_chat(
                 continue
             if command.name == "/trace":
                 render_trace(session.messages())
+                continue
+            if command.name == "/cache":
+                from react_loop.market_data import MarketDataCache
+
+                if command.arg.strip().lower() == "clear":
+                    write(f"Cleared {MarketDataCache().clear()} market-cache entries.")
+                else:
+                    from react_loop.tools import market_cache_status
+
+                    write(market_cache_status.invoke({}))
+                continue
+            if command.name == "/refresh":
+                if not command.arg:
+                    write("Usage: /refresh <symbol>")
+                    continue
+                try:
+                    ticker = get_market_state().normalize_symbol(command.arg)
+                    service = get_market_service()
+                    result = service.quote(ticker, refresh=True)
+                    freshness = "stale" if result.stale else "fresh"
+                    write(
+                        f"{ticker}: {result.value.price} as of {result.value.as_of} "
+                        f"({freshness}; source {result.source.provider})"
+                    )
+                except Exception as exc:
+                    write(f"Error: refresh failed: {exc}")
+                continue
+            if command.name == "/calendar":
+                if not command.arg:
+                    write("Usage: /calendar <symbol|watchlist|next 30d>")
+                    continue
+                from react_loop.tools import market_calendar
+
+                calendar_parts = command.arg.split()
+                if calendar_parts[0].lower() in {"watchlist", "next"}:
+                    symbols = get_market_state().watchlist()
+                    if not symbols:
+                        write("Watchlist is empty.")
+                        continue
+                    days = 365
+                    future_only = calendar_parts[0].lower() == "next"
+                    if future_only and len(calendar_parts) > 1:
+                        try:
+                            days = int(calendar_parts[1].rstrip("d"))
+                        except ValueError:
+                            write("Usage: /calendar next <days>d")
+                            continue
+                    outputs = [
+                        market_calendar.invoke(
+                            {"symbol": symbol, "days": days, "future_only": future_only}
+                        )
+                        for symbol in symbols
+                    ]
+                    write("\n\n".join(outputs))
+                else:
+                    write(market_calendar.invoke({"symbol": calendar_parts[0]}))
                 continue
             if command.name == "/save":
                 from react_loop.persistence import SessionManager
@@ -334,24 +417,76 @@ async def run_chat(
                     write(f"Error: {exc}")
                 continue
             elif command.name == "/watchlist":
-                symbols = get_market_state().watchlist()
-                write("Watchlist: " + (", ".join(symbols) if symbols else "(empty)"))
+                parts = command.arg.split()
+                if not parts:
+                    symbols = get_market_state().watchlist()
+                    write("Watchlist: " + (", ".join(symbols) if symbols else "(empty)"))
+                    continue
+                action = parts[0].lower()
+                if action not in {"dashboard", "refresh", "export"}:
+                    write("Usage: /watchlist [dashboard|refresh|export <path>]")
+                    continue
+                try:
+                    service = get_market_service()
+                    if action == "refresh":
+                        for symbol in get_market_state().watchlist():
+                            service.cache.clear(symbol)
+                    from react_loop.market_dashboard import watchlist_output
+
+                    if action == "export":
+                        if len(parts) != 2:
+                            write("Usage: /watchlist export <path>")
+                            continue
+                        path = parts[1]
+                        output_format = "csv" if path.lower().endswith(".csv") else "json"
+                        content = watchlist_output(get_market_state(), service, output_format)
+                        from pathlib import Path
+
+                        Path(path).write_text(content, encoding="utf-8")
+                        write(f"Watchlist exported to {path}.")
+                    else:
+                        write(watchlist_output(get_market_state(), service))
+                except Exception as exc:
+                    write(f"Error: watchlist dashboard unavailable: {exc}")
                 continue
             elif command.name == "/portfolio":
                 parts = command.arg.split()
-                if not parts:
-                    positions = get_market_state().portfolio()
-                    if not positions:
-                        write("Portfolio: (empty)")
-                    else:
-                        write(
-                            "Portfolio: "
-                            + "; ".join(
-                                f"{position['symbol']}: {position['quantity']:g} shares "
-                                f"at {position['cost_basis']:.2f}"
-                                for position in positions
+                action = parts[0].lower() if parts else "summary"
+                if action in {"summary", "performance", "allocation", "export"}:
+                    try:
+                        service = get_market_service()
+                        from react_loop.market_dashboard import build_portfolio_report
+                        from react_loop.portfolio import render_portfolio
+
+                        report = build_portfolio_report(get_market_state(), service)
+                        if action == "allocation":
+                            rows = report["allocation"]
+                            write(
+                                "Symbol | Sector | Market value | Allocation\n"
+                                "--- | --- | ---: | ---:\n"
+                                + "\n".join(
+                                    f"{row['symbol']} | {row['sector'] or 'unknown'} | "
+                                    f"{row['market_value'] if row['market_value'] is not None else 'unavailable'} | "
+                                    f"{row['percent'] if row['percent'] is not None else 'unavailable'}"
+                                    for row in rows
+                                )
                             )
-                        )
+                        elif action == "export":
+                            if len(parts) != 2:
+                                write("Usage: /portfolio export <path>")
+                                continue
+                            path = parts[1]
+                            output_format = "csv" if path.lower().endswith(".csv") else "json"
+                            from pathlib import Path
+
+                            Path(path).write_text(
+                                render_portfolio(report, output_format), encoding="utf-8"
+                            )
+                            write(f"Portfolio exported to {path}.")
+                        else:
+                            write(render_portfolio(report))
+                    except Exception as exc:
+                        write(f"Error: portfolio analytics unavailable: {exc}")
                     continue
                 if len(parts) != 3:
                     write("Usage: /portfolio <symbol> <quantity> <cost_basis>")
@@ -366,28 +501,69 @@ async def run_chat(
                 continue
             elif command.name == "/alert":
                 parts = command.arg.split()
-                if len(parts) != 3:
-                    write("Usage: /alert <symbol> <above|below> <threshold>")
+                manager = get_market_state()
+                if parts and parts[0].lower() in {"disable", "enable", "delete"}:
+                    if len(parts) != 2:
+                        write("Usage: /alert <disable|enable|delete> <id>")
+                        continue
+                    try:
+                        alert_id = int(parts[1])
+                        if parts[0].lower() == "delete":
+                            manager.delete_alert(alert_id)
+                            write(f"Deleted alert {alert_id}.")
+                        else:
+                            manager.set_alert_enabled(alert_id, parts[0].lower() == "enable")
+                            write(f"Alert {alert_id} {'enabled' if parts[0].lower() == 'enable' else 'disabled'}.")
+                    except (ValueError, TypeError) as exc:
+                        write(f"Error: {exc}")
+                    continue
+                condition_type = "price"
+                if len(parts) == 3:
+                    symbol, operator, threshold_text = parts
+                elif len(parts) in {4, 5}:
+                    symbol, condition_type, operator, threshold_text = parts[:4]
+                else:
+                    write(
+                        "Usage: /alert <symbol> [price|change|volume|rsi|moving_average|drawdown] "
+                        "<above|below> <threshold> [cooldown_seconds]"
+                    )
                     continue
                 try:
-                    alert_id = get_market_state().add_alert(
-                        parts[0], parts[1].lower(), float(parts[2])
+                    cooldown = int(parts[4]) if len(parts) == 5 else 3600
+                    alert_id = manager.add_alert(
+                        symbol,
+                        operator.lower(),
+                        float(threshold_text.rstrip("%")),
+                        condition_type,
+                        cooldown,
                     )
                     write(f"Created alert {alert_id}.")
                 except ValueError as exc:
                     write(f"Error: {exc}")
                 continue
             elif command.name == "/alerts":
+                if command.arg.strip().lower() == "history":
+                    history = get_market_state().alert_history()
+                    write(
+                        "\n".join(
+                            f"{row['triggered_at']} | alert {row['alert_id']} | "
+                            f"{row['status']} | {row['message']}"
+                            for row in history
+                        )
+                        or "Alert history: (empty)"
+                    )
+                    continue
                 configured = get_market_state().alerts()
                 triggered = get_market_state().evaluate_alerts() if configured else []
                 lines = [
-                    f"{alert['id']}: {alert['symbol']} {alert['operator']} "
-                    f"{alert['threshold']:.2f}"
+                    f"{alert['id']}: {alert['symbol']} {alert['condition_type']} "
+                    f"{alert['operator']} {alert['threshold']:.2f} "
+                    f"({'enabled' if alert['enabled'] else 'disabled'})"
                     for alert in configured
                 ]
                 if triggered:
                     lines.append("Triggered: " + "; ".join(triggered))
-                write("; ".join(lines) if lines else "Alerts: (none)")
+                write("\n".join(lines) if lines else "Alerts: (none)")
                 continue
             else:
                 write(f"Unknown command {command.name}. Type /help for the list.")

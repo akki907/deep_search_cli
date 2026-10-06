@@ -16,6 +16,13 @@ Research Microsoft (MSFT). Give me its current price, key fundamentals, technica
 What is the current market summary for AAPL?
 ```
 
+### Indian NSE/BSE market summary
+
+```text
+What is the current market summary for CEAT? Use the NSE listing when
+available, and identify the canonical Yahoo Finance symbol and currency.
+```
+
 ### Peer comparison
 
 ```text
@@ -73,17 +80,46 @@ uv run python -m react_loop --deep-research --no-trace \
 /compare MSFT AAPL GOOGL
 /backtest MSFT 60
 /watch MSFT
-/watchlist
-/portfolio MSFT 10 300
-/alert MSFT below 250
-/alerts
+/watchlist dashboard
+/watchlist refresh
+/watchlist export watchlist.csv
+/portfolio summary
+/portfolio performance
+/portfolio allocation
+/portfolio export portfolio.json
+/calendar MSFT
+/calendar next 30d
+/cache
+/refresh MSFT
+/alert MSFT price below 250
+/alert AAPL change below -5%
+/alerts history
 /sources
 /report
 ```
+
+## Data and forecast-evaluation prompts
+
+```text
+Show the latest 10-K and 10-Q filings for MSFT, with filing dates and source URLs.
+Show MSFT earnings history, separating reported EPS from estimates.
+Run a 5-year MSFT backtest at 60 trading days against SPY with 5 bps costs and 10 bps slippage.
+Evaluate these scenario probabilities: {"predictions":[{"probability":0.7,"outcome":1},{"probability":0.3,"outcome":0}]}
+```
+
+Run the explicit alert scheduler when notifications are required:
+
+```bash
+uv run python -m react_loop --monitor-alerts --alert-interval 60
+```
+
+The scheduler is opt-in. It records notification failures in alert history and
+does not silently disable alerts.
 
 ## Notes
 
 - Market data depends on the Yahoo Finance endpoints being reachable.
 - Historical backtests describe past return distributions; they are not forecasts.
 - Scenario outputs are uncertain research estimates, not personalized investment advice.
-- Alerts are evaluated when `/alerts` is run; they are not background notifications.
+- Manual `/alerts` evaluation remains available; background evaluation only runs
+  when `--monitor-alerts` is explicitly started.

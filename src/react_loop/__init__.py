@@ -15,6 +15,23 @@ from react_loop.graph import (
 from react_loop.llm import ReActModel, ScriptedChatModel, build_llm
 from react_loop.runner import ReActRunner, final_answer, run_react, trace
 from react_loop.market_state import MarketStateManager
+from react_loop.alerts import (
+    AlertScheduler,
+    EmailNotifier,
+    MemoryNotifier,
+    WebhookNotifier,
+)
+from react_loop.market_data import (
+    CachedMarketDataService,
+    FallbackMarketDataProvider,
+    MarketDataCache,
+    MarketDataError,
+    MarketDataProvider,
+    MarketEvent,
+    PriceBar,
+    Quote,
+    SourceInfo,
+)
 from react_loop.state import AgentState
 from react_loop.streaming import (
     FinalEvent,
@@ -34,6 +51,13 @@ from react_loop.tools import (
     stock_fundamentals,
     compare_stocks,
     stock_backtest,
+    evaluate_forecast_probabilities,
+    sec_filings,
+    earnings_history,
+    earnings_calendar,
+    market_calendar,
+    market_cache_status,
+    clear_market_cache,
     web_search,
     wikipedia_search,
     wikipedia_summary,
@@ -41,6 +65,19 @@ from react_loop.tools import (
 
 __all__ = [
     "ALL_TOOLS",
+    "AlertScheduler",
+    "CachedMarketDataService",
+    "FallbackMarketDataProvider",
+    "EmailNotifier",
+    "MarketDataCache",
+    "MarketDataError",
+    "MarketDataProvider",
+    "MarketEvent",
+    "MemoryNotifier",
+    "PriceBar",
+    "Quote",
+    "SourceInfo",
+    "WebhookNotifier",
     "DEFAULT_SYSTEM_PROMPT",
     "AgentState",
     "MarketStateManager",
@@ -74,6 +111,13 @@ __all__ = [
     "stock_fundamentals",
     "compare_stocks",
     "stock_backtest",
+    "evaluate_forecast_probabilities",
+    "sec_filings",
+    "earnings_history",
+    "earnings_calendar",
+    "market_calendar",
+    "market_cache_status",
+    "clear_market_cache",
     "trace",
     "web_search",
     "wikipedia_search",

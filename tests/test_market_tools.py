@@ -3,12 +3,13 @@
 import pytest
 
 from react_loop.tools import (
+    STOCK_SEARCH_URL,
     compare_stocks,
     resolve_stock_symbol,
+    stock_backtest,
     stock_fundamentals,
     stock_market_data,
     stock_technicals,
-    stock_backtest,
 )
 
 
@@ -198,3 +199,63 @@ def test_stock_backtest_reports_historical_distribution(monkeypatch):
     assert "Observations evaluated: 2" in out
     assert "Positive-return frequency: 100.00%" in out
     assert "not a forecast" in out
+
+
+def test_stock_market_data_resolves_indian_nse_symbol(monkeypatch):
+    class MissingDirectSymbol(FakeResponse):
+        def raise_for_status(self) -> None:
+            raise RuntimeError("404 Not Found")
+
+    calls: list[str] = []
+
+    def respond(url, params=None, headers=None, timeout=None):
+        calls.append(url)
+        if url.endswith("/CEAT"):
+            return MissingDirectSymbol({})
+        if url == STOCK_SEARCH_URL:
+            return FakeResponse(
+                {
+                    "quotes": [
+                        {
+                            "symbol": "CEATLTD.NS",
+                            "exchange": "NSI",
+                            "quoteType": "EQUITY",
+                        },
+                        {
+                            "symbol": "CEATLTD.BO",
+                            "exchange": "BSE",
+                            "quoteType": "EQUITY",
+                        },
+                    ]
+                }
+            )
+        payload = chart_payload()
+        payload["chart"]["result"][0]["meta"].update(
+            {"symbol": "CEATLTD.NS", "exchangeName": "NSI", "currency": "INR"}
+        )
+        return FakeResponse(payload)
+
+    monkeypatch.setattr("requests.get", respond)
+
+    out = stock_market_data.invoke({"symbol": "ceat", "period": "1mo"})
+
+    assert "Symbol: CEATLTD.NS" in out
+    assert "Exchange: NSI" in out
+    assert "Currency: INR" in out
+    assert calls == [
+        "https://query1.finance.yahoo.com/v8/finance/chart/CEAT",
+        STOCK_SEARCH_URL,
+        "https://query1.finance.yahoo.com/v8/finance/chart/CEATLTD.NS",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("symbol", "expected"),
+    [("NSE:CEAT", "CEAT.NS"), ("CEAT.BSE", "CEAT.BO")],
+)
+def test_stock_market_data_accepts_indian_exchange_aliases(monkeypatch, symbol, expected):
+    monkeypatch.setattr("requests.get", lambda *_args, **_kwargs: FakeResponse(chart_payload()))
+
+    out = stock_market_data.invoke({"symbol": symbol, "period": "1mo"})
+
+    assert f"Symbol: {expected}" in out

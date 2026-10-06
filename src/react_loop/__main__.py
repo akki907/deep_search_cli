@@ -28,8 +28,8 @@ from react_loop.console import (
 )
 from react_loop.demo import DEMO_QUESTION, DEMO_SCRIPT
 from react_loop.llm import ReActModel, ScriptedChatModel, build_llm, resolve_target
-from react_loop.research import DEEP_RESEARCH_SYSTEM_PROMPT
 from react_loop.reporting import render_report
+from react_loop.research import DEEP_RESEARCH_SYSTEM_PROMPT
 from react_loop.runner import ReActRunner, final_answer
 from react_loop.streaming import ReActStreamRunner
 
@@ -108,7 +108,7 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
         approval_prompt = _prompt(
             "Approve? [A]pprove, [E]dit, [C]ancel: ", "yellow", use_rich
         )
-        choice = await prompt_session.prompt_async(approval_prompt)
+        choice = await prompt_async(approval_prompt)
         choice = choice.strip().lower()
         if choice.startswith("a") or choice == "y":
             approved_tools.update(tc["name"] for tc in tool_calls)
@@ -121,7 +121,7 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
             # Simple edit: just ask for a new JSON string for the first tool call.
             # Edited calls are not remembered because their arguments are one-off.
             edit_prompt = _prompt("Enter new args (JSON): ", "yellow", use_rich)
-            new_args = await prompt_session.prompt_async(edit_prompt)
+            new_args = await prompt_async(edit_prompt)
             import json
             try:
                 args = json.loads(new_args)
@@ -193,8 +193,16 @@ def _run_chat(llm: ReActModel, args: argparse.Namespace, console: Console, use_r
     completer = WordCompleter(list(COMMANDS.keys()), ignore_case=True)
     prompt_session = PromptSession(completer=completer)
 
+    async def prompt_async(prompt: str | HTML = "") -> str:
+        try:
+            return await prompt_session.prompt_async(prompt)
+        except TypeError as exc:
+            if "positional arguments" not in str(exc):
+                raise
+            return await prompt_session.prompt_async()
+
     async def read_line(_prompt: str) -> str:
-        return await prompt_session.prompt_async(HTML('<style fg="cyan" bold="true">👤 you > </style>'))
+        return await prompt_async(HTML('<style fg="cyan" bold="true">👤 you > </style>'))
     session = ChatSession(runner, recursion_limit=args.max_steps)
     provider, model = resolve_target(args.model, args.provider)
     console.print(banner(provider, model))
@@ -249,6 +257,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         help="Write the report to a file; use '-' for stdout",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Clear persistent market-data cache before running the request",
+    )
+    parser.add_argument(
+        "--monitor-alerts",
+        action="store_true",
+        help="Run the persistent alert scheduler until interrupted",
+    )
+    parser.add_argument(
+        "--alert-interval",
+        type=float,
+        default=60.0,
+        help="Alert scheduler interval in seconds",
+    )
+    parser.add_argument(
+        "--alert-webhook",
+        help="Optional webhook URL for the alert scheduler",
     )
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
@@ -343,6 +371,26 @@ def main(argv: list[str] | None = None) -> int:
     use_rich = sys.stdout.isatty() if args.rich is None else args.rich
     console = get_console(force_terminal=use_rich or None)
     setup_logging(args.log_level, force_terminal=use_rich or None)
+    if args.refresh:
+        from react_loop.market_data import MarketDataCache
+
+        MarketDataCache().clear()
+    if args.monitor_alerts:
+        from react_loop.alerts import AlertScheduler, WebhookNotifier
+        from react_loop.market_state import MarketStateManager
+
+        notifiers = [WebhookNotifier(args.alert_webhook)] if args.alert_webhook else None
+        try:
+            AlertScheduler(
+                MarketStateManager(),
+                notifiers=notifiers,
+                interval_seconds=args.alert_interval,
+            ).run_forever()
+        except KeyboardInterrupt:
+            return 0
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     # No question and no demo means the user wants a session. Reading from a
     # pipe would look like a hang, so refuse instead of waiting for input that
